@@ -131,6 +131,9 @@ export default function SimMap({ sim, addMode, onAddMode, selected, onSelect }) 
     }
 
     for (const driver of drivers) {
+      const pos = _safePos(driver);
+      if (!pos) continue;
+
       const key      = driver.id;
       const isMoving = driver.status !== 'idle';
       const hasPath = driver.path && Array.isArray(driver.path) && driver.path.length > 1;
@@ -152,12 +155,12 @@ export default function SimMap({ sim, addMode, onAddMode, selected, onSelect }) 
           onSelectRef.current({ type: 'driver', id: driver.id });
         });
         const marker = new _ml.Marker({ element: el, anchor: 'center' })
-          .setLngLat([driver.pos.lng, driver.pos.lat])
+          .setLngLat([pos.lng, pos.lat])
           .addTo(map);
         markersRef.current[key] = { marker, el };
       } else {
         const { marker, el } = markersRef.current[key];
-        marker.setLngLat([driver.pos.lng, driver.pos.lat]);
+        marker.setLngLat([pos.lng, pos.lat]);
         el.innerHTML = driverSVG(heading, isMoving);
       }
 
@@ -185,6 +188,8 @@ export default function SimMap({ sim, addMode, onAddMode, selected, onSelect }) 
     }
 
     for (const entity of entities) {
+      if (!_isValidPos(entity.pos)) continue;
+
       if (markersRef.current[entity.id]) {
         markersRef.current[entity.id].el.style.filter =
           selected?.id === entity.id
@@ -221,7 +226,10 @@ export default function SimMap({ sim, addMode, onAddMode, selected, onSelect }) 
         type: 'Feature', properties: {},
         geometry: {
           type:        'LineString',
-          coordinates: driver.path.slice(driver.path_index).map(p => [p.lng, p.lat]),
+          coordinates: driver.path
+            .slice(driver.path_index)
+            .filter(_isValidPos)
+            .map(p => [p.lng, p.lat]),
         },
       };
       if (!map.getSource(srcId)) {
@@ -295,4 +303,14 @@ function _bearingBetween(from, to) {
   const y = Math.sin(dLng) * Math.cos(lat2);
   const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
   return ((Math.atan2(y, x) * 180 / Math.PI) + 360) % 360;
+}
+
+function _safePos(driver) {
+  if (_isValidPos(driver?.pos)) return driver.pos;
+  if (_isValidPos(driver?.home_pos)) return driver.home_pos;
+  return null;
+}
+
+function _isValidPos(pos) {
+  return Number.isFinite(pos?.lat) && Number.isFinite(pos?.lng);
 }
