@@ -131,6 +131,9 @@ export default function SimMap({ sim, addMode, onAddMode, selected, onSelect }) 
     }
 
     for (const driver of drivers) {
+      const pos = _safePos(driver);
+      if (!pos) continue;
+
       const key      = driver.id;
       const isMoving = driver.status !== 'idle';
       const hasPath = driver.path && Array.isArray(driver.path) && driver.path.length > 1;
@@ -152,19 +155,28 @@ export default function SimMap({ sim, addMode, onAddMode, selected, onSelect }) 
           onSelectRef.current({ type: 'driver', id: driver.id });
         });
         const marker = new _ml.Marker({ element: el, anchor: 'center' })
-          .setLngLat([driver.pos.lng, driver.pos.lat])
+          .setLngLat([pos.lng, pos.lat])
           .addTo(map);
-        markersRef.current[key] = { marker, el };
+        markersRef.current[key] = { marker, el, heading, isMoving, lat: pos.lat, lng: pos.lng };
       } else {
-        const { marker, el } = markersRef.current[key];
-        marker.setLngLat([driver.pos.lng, driver.pos.lat]);
-        el.innerHTML = driverSVG(heading, isMoving);
+        const markerState = markersRef.current[key];
+        const { marker, el } = markerState;
+        if (markerState.lat !== pos.lat || markerState.lng !== pos.lng) {
+          marker.setLngLat([pos.lng, pos.lat]);
+          markerState.lat = pos.lat;
+          markerState.lng = pos.lng;
+        }
+        if (markerState.heading !== heading || markerState.isMoving !== isMoving) {
+          el.innerHTML = driverSVG(heading, isMoving);
+          markerState.heading = heading;
+          markerState.isMoving = isMoving;
+        }
       }
 
       markersRef.current[key].el.style.filter =
         selected?.id === driver.id ? 'drop-shadow(0 0 6px #2f81f7)' : '';
     }
-  }); // sin deps — RT
+  }, [world.drivers, selected]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Markers estáticos (restaurants + customers) ───────────────────────────
   useEffect(() => {
@@ -185,6 +197,8 @@ export default function SimMap({ sim, addMode, onAddMode, selected, onSelect }) 
     }
 
     for (const entity of entities) {
+      if (!_isValidPos(entity.pos)) continue;
+
       if (markersRef.current[entity.id]) {
         markersRef.current[entity.id].el.style.filter =
           selected?.id === entity.id
@@ -217,11 +231,15 @@ export default function SimMap({ sim, addMode, onAddMode, selected, onSelect }) 
     for (const driver of Object.values(world.drivers)) {
       const srcId = `route-${driver.id}`;
       const lyrId = `route-layer-${driver.id}`;
+      const path = Array.isArray(driver.path) ? driver.path : [];
       const geo   = {
         type: 'Feature', properties: {},
         geometry: {
           type:        'LineString',
-          coordinates: driver.path.slice(driver.path_index).map(p => [p.lng, p.lat]),
+          coordinates: path
+            .slice(driver.path_index)
+            .filter(_isValidPos)
+            .map(p => [p.lng, p.lat]),
         },
       };
       if (!map.getSource(srcId)) {
@@ -250,7 +268,7 @@ export default function SimMap({ sim, addMode, onAddMode, selected, onSelect }) 
         delete routeLayersRef.current[driverId];
       }
     }
-  }); // sin deps — RT
+  }, [world.drivers]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div style={{ height: '100%', width: '100%', position: 'relative' }}>
@@ -295,4 +313,14 @@ function _bearingBetween(from, to) {
   const y = Math.sin(dLng) * Math.cos(lat2);
   const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
   return ((Math.atan2(y, x) * 180 / Math.PI) + 360) % 360;
+}
+
+function _safePos(driver) {
+  if (_isValidPos(driver?.pos)) return driver.pos;
+  if (_isValidPos(driver?.home_pos)) return driver.home_pos;
+  return null;
+}
+
+function _isValidPos(pos) {
+  return Number.isFinite(pos?.lat) && Number.isFinite(pos?.lng);
 }

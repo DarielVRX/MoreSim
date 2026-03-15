@@ -34,10 +34,10 @@ export const DEFAULT_VARIABLES = [
     enabled:     true,
     weight:      100,
     effect:      'gate',
-    description: 'El driver debe estar en estado idle o waiting_at_restaurant.',
+    description: 'El driver participa mientras tenga posición válida; el límite real de carga lo controla Capacidad de pedidos.',
     formula_override: null,
     compute: (driver) => {
-      return driver.status === 'idle' || driver.status === 'waiting_at_restaurant';
+      return Number.isFinite(driver?.pos?.lat) && Number.isFinite(driver?.pos?.lng);
     },
   },
   {
@@ -49,7 +49,9 @@ export const DEFAULT_VARIABLES = [
     description: 'El driver no puede superar su límite de pedidos simultáneos.',
     formula_override: null,
     compute: (driver) => {
-      return driver.orders.length < driver.max_orders;
+      const activeOrders = Array.isArray(driver.orders) ? driver.orders.length : 0;
+      const maxOrders = Number.isFinite(driver.max_orders) ? driver.max_orders : 1;
+      return activeOrders < maxOrders;
     },
   },
 
