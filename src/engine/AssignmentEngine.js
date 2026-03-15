@@ -97,6 +97,10 @@ export class AssignmentEngine {
     const { drivers, restaurants, customers } = this._world;
     const restaurant = restaurants[order.restaurant_id];
     const customer   = customers[order.customer_id];
+    if (!restaurant || !customer) return;
+    if (!Number.isFinite(restaurant?.pos?.lat) || !Number.isFinite(restaurant?.pos?.lng) ||
+        !Number.isFinite(customer?.pos?.lat) || !Number.isFinite(customer?.pos?.lng)) return;
+
     // Restricción distancia comercio→cliente
     const distKm = haversineMeters(restaurant.pos, customer.pos) / 1000;
     if (customer.max_distance_km > 0 && distKm > customer.max_distance_km) {
@@ -109,9 +113,22 @@ export class AssignmentEngine {
       order.status = 'cancelled';
       return;
     }
-    if (!restaurant || !customer) return;
+    const driverList = Object.values(drivers).filter((driver) => {
+      const activeOrders = Array.isArray(driver.orders) ? driver.orders.length : 0;
+      const maxOrders = Number.isFinite(driver.max_orders) ? driver.max_orders : 1;
+      return activeOrders < maxOrders && Number.isFinite(driver?.pos?.lat) && Number.isFinite(driver?.pos?.lng);
+    });
 
-    const driverList = Object.values(drivers);
+
+    if (driverList.length === 0) {
+      this._onEvent({
+        time:    simTime,
+        type:    'no_driver',
+        message: `⚠️ Pedido ${order.id} sin driver disponible`,
+        orderId: order.id,
+      });
+      return;
+    }
 
     // Pre-calcular ETA de cada driver al restaurante
     await Promise.all(driverList.map(async (driver) => {

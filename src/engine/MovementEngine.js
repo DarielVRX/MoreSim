@@ -17,18 +17,25 @@ import { getGraph, nearestNode, haversineMeters } from './GraphCache.js';
 const OSRM_BASE = 'https://router.project-osrm.org/route/v1/driving';
 const SIGNAL_STOP_S   = 10;   // segundos en semáforo real
 const CORNER_STOP_S   = 1.5;  // segundos en esquina simple
+const OSRM_TIMEOUT_MS = 3500;
 
 // ─── OSRM route ───────────────────────────────────────────────────────────────
 // Retorna [{lat, lng}] de puntos de la ruta y distancia total en metros.
 export async function fetchOSRMRoute(from, to) {
   const url = `${OSRM_BASE}/${from.lng},${from.lat};${to.lng},${to.lat}?overview=full&geometries=geojson&steps=false`;
-  const res  = await fetch(url);
-  if (!res.ok) throw new Error(`OSRM ${res.status}`);
-  const data  = await res.json();
-  const route = data.routes?.[0];
-  if (!route) throw new Error('OSRM: sin ruta');
-  const coords = route.geometry.coordinates.map(([lng, lat]) => ({ lat, lng }));
-  return { path: coords, distance_m: route.distance, duration_s: route.duration };
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort('timeout'), OSRM_TIMEOUT_MS);
+  try {
+    const res  = await fetch(url, { signal: controller.signal });
+    if (!res.ok) throw new Error(`OSRM ${res.status}`);
+    const data  = await res.json();
+    const route = data.routes?.[0];
+    if (!route) throw new Error('OSRM: sin ruta');
+    const coords = route.geometry.coordinates.map(([lng, lat]) => ({ lat, lng }));
+    return { path: coords, distance_m: route.distance, duration_s: route.duration };
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 // ─── A* en grafo local ────────────────────────────────────────────────────────
@@ -132,7 +139,8 @@ export class MovementEngine {
       driver.path_index    = 0;
       driver.segment_elapsed = 0;
       const dist = haversineMeters(from, to);
-      return { distance_m: dist, duration_s: dist / ((driver.speed_kmh * 1000) / 3600) };
+      const safeSpeed = Number.isFinite(driver.speed_kmh) && driver.speed_kmh > 0 ? driver.speed_kmh : 30;
+      return { distance_m: dist, duration_s: dist / ((safeSpeed * 1000) / 3600) };
     }
   }
 
@@ -173,6 +181,13 @@ export class MovementEngine {
   _tickDriver(driver, dtSim, restaurants, onDriverArrived) {
     const path = Array.isArray(driver.path) ? driver.path : [];
     if (!Array.isArray(driver.path)) driver.path = path;
+
+    driver.path_index = Number.isFinite(driver.path_index) ? driver.path_index : 0;
+    driver.segment_elapsed = Number.isFinite(driver.segment_elapsed) ? driver.segment_elapsed : 0;
+    driver.stop_elapsed = Number.isFinite(driver.stop_elapsed) ? driver.stop_elapsed : 0;
+    driver.stop_duration = Number.isFinite(driver.stop_duration) ? driver.stop_duration : 0;
+    driver.metrics = driver.metrics ?? { dead_km: 0, idle_time_s: 0, total_distance_km: 0 };
+    const speedKmh = Number.isFinite(driver.speed_kmh) && driver.speed_kmh > 0 ? driver.speed_kmh : 30;
 
     if (path.length === 0) {
       const orders = Array.isArray(driver.orders) ? driver.orders : [];
@@ -221,7 +236,7 @@ export class MovementEngine {
 
       // ── Avanzar por el segmento ──────────────────────────────────────────
       const segDist_m = haversineMeters(from, to);
-      const speed_ms  = (driver.speed_kmh * 1000) / 3600;
+      const speed_ms  = (speedKmh * 1000) / 3600;
       const segDur_s  = segDist_m / speed_ms;
 
       const segRemaining = segDur_s - driver.segment_elapsed;
