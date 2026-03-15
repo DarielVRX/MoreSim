@@ -171,9 +171,14 @@ export class MovementEngine {
   }
 
   _tickDriver(driver, dtSim, restaurants, onDriverArrived) {
-    if (driver.path.length === 0) {
+    const path = Array.isArray(driver.path) ? driver.path : [];
+    if (!Array.isArray(driver.path)) driver.path = path;
+
+    if (path.length === 0) {
+      const orders = Array.isArray(driver.orders) ? driver.orders : [];
+      if (!Array.isArray(driver.orders)) driver.orders = orders;
       const isWaiting = driver.status === 'idle' ||
-      (driver.status === 'waiting_at_restaurant' && driver.orders.length === 0);
+      (driver.status === 'waiting_at_restaurant' && orders.length === 0);
 
       if (isWaiting) {
         driver.idle_elapsed = (driver.idle_elapsed ?? 0) + dtSim;
@@ -192,9 +197,9 @@ export class MovementEngine {
 
     let remaining = dtSim;
 
-    while (remaining > 0 && driver.path_index < driver.path.length - 1) {
-      const from  = driver.path[driver.path_index];
-      const to    = driver.path[driver.path_index + 1];
+    while (remaining > 0 && driver.path_index < path.length - 1) {
+      const from  = path[driver.path_index];
+      const to    = path[driver.path_index + 1];
 
       // ── Stop en nodo actual ──────────────────────────────────────────────
       const stopDur = from.stop_s ?? 0;
@@ -245,7 +250,7 @@ export class MovementEngine {
         driver.pos             = { lat: to.lat, lng: to.lng };
 
         // Verificar si llegó al final del path
-        if (driver.path_index >= driver.path.length - 1) {
+        if (driver.path_index >= path.length - 1) {
           driver.path       = [];
           driver.path_index = 0;
           onDriverArrived?.(driver, driver._arrival_type ?? 'at_free_dest');

@@ -222,11 +222,12 @@ export default function SimMap({ sim, addMode, onAddMode, selected, onSelect }) 
     for (const driver of Object.values(world.drivers)) {
       const srcId = `route-${driver.id}`;
       const lyrId = `route-layer-${driver.id}`;
+      const path = Array.isArray(driver.path) ? driver.path : [];
       const geo   = {
         type: 'Feature', properties: {},
         geometry: {
           type:        'LineString',
-          coordinates: driver.path
+          coordinates: path
             .slice(driver.path_index)
             .filter(_isValidPos)
             .map(p => [p.lng, p.lat]),
