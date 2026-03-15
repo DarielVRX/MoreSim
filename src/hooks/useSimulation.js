@@ -54,6 +54,9 @@ export function useSimulation() {
   // Ref mutable al world para engines (sin stale closure)
   const worldRef = useRef(world);
   useEffect(() => { worldRef.current = world; }, [world]);
+  if (assignRef.current) {
+    assignRef.current._world = worldRef.current;
+  }
 
   const variablesRef = useRef(variables);
   useEffect(() => { variablesRef.current = variables; }, [variables]);
@@ -92,6 +95,7 @@ export function useSimulation() {
       for (const order of Object.values(w.orders)) {
         if (!order.triggered && typeof order.trigger === 'number' && st >= order.trigger) {
           order.triggered = true;
+          assignRef.current?.handleOrderCreated(order.id, st);
         }
       }
 
@@ -270,17 +274,33 @@ export function useSimulation() {
   // ── Pedidos ───────────────────────────────────────────────────────────────
   // Lanzar pedido manual durante la simulación
   const dispatchOrder = useCallback((restaurantId, customerId, overrides = {}) => {
+
     const order = createOrder(restaurantId, customerId, {
       ...overrides,
-      trigger:   'manual',
-      triggered: true,   // entra al engine en el siguiente tick
+      trigger: 'manual',
+      triggered: true,
     });
+
     setWorld(prev => {
-      const next = { ...prev, orders: { ...prev.orders, [order.id]: order } };
+
+      const next = {
+        ...prev,
+        orders: { ...prev.orders, [order.id]: order }
+      };
+
       _autoSave(next, variablesRef.current);
+
+      // disparar evento
+      if (assignRef.current) {
+        assignRef.current._world = next;
+        assignRef.current.handleOrderCreated(order.id, clockRef.current.simTime);
+      }
+
       return next;
     });
+
     return order.id;
+
   }, []);
 
   // Agregar pedido pre-programado a un restaurante (en orders_config)
@@ -319,11 +339,28 @@ export function useSimulation() {
 
   // Disparar manualmente un pedido pre-programado
   const triggerOrder = useCallback((orderId) => {
+
     setWorld(prev => {
+
       const order = prev.orders[orderId];
       if (!order) return prev;
-      return { ...prev, orders: { ...prev.orders, [orderId]: { ...order, triggered: true } } };
+
+      const updated = { ...order, triggered: true };
+
+      const next = {
+        ...prev,
+        orders: { ...prev.orders, [orderId]: updated }
+      };
+
+      if (assignRef.current) {
+        assignRef.current._world = next;
+        assignRef.current.handleOrderCreated(order.id, clockRef.current.simTime);
+      }
+
+      return next;
+
     });
+
   }, []);
 
   // ── Variables de scoring ──────────────────────────────────────────────────
