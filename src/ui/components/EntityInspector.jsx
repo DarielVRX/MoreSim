@@ -1,24 +1,39 @@
 // src/ui/components/EntityInspector.jsx
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import OrderConfigRow from './OrderConfigRow.jsx';
 
-// Solo una sección abierta a la vez + solo un entity row expandido a la vez
 export default function EntityInspector({ sim, selected, onSelect }) {
   const { world, simState } = sim;
-  const [openSection,  setOpenSection]  = useState('drivers');    // 'drivers'|'restaurants'|'customers'|null
-  const [expandedEntity, setExpandedEntity] = useState(null);     // id del entity con params abiertos
+  const [openSection,    setOpenSection]    = useState('drivers');
+  const [expandedEntity, setExpandedEntity] = useState(null);
 
   const canEdit = simState === 'stopped' || simState === 'paused';
+
+  // Cuando el mapa u otro origen externo cambia `selected`,
+  // abrir la sección correcta y expandir la entidad automáticamente.
+  useEffect(() => {
+    if (!selected?.id || !selected?.type) return;
+    const sectionMap = { driver: 'drivers', restaurant: 'restaurants', customer: 'customers' };
+    const section    = sectionMap[selected.type];
+    if (section) setOpenSection(section);
+    setExpandedEntity(selected.id);
+  }, [selected?.id, selected?.type]);
 
   function toggleSection(s) {
     setOpenSection(prev => prev === s ? null : s);
     setExpandedEntity(null);
   }
 
-  function toggleEntity(id) {
-    setExpandedEntity(prev => prev === id ? null : id);
-    onSelect(id ? { id } : null);
+  function toggleEntity(id, type) {
+    const next = expandedEntity === id ? null : id;
+    setExpandedEntity(next);
+    onSelect(next ? { type, id } : null);
   }
+
+  // ... resto sin cambios, solo las llamadas a onRowClick:
+  // onRowClick={() => toggleEntity(driver.id, 'driver')}
+  // onRowClick={() => toggleEntity(r.id, 'restaurant')}
+  // onRowClick={() => toggleEntity(c.id, 'customer')}
 
   return (
     <div style={{ flex: 1, overflowY: 'auto' }}>
@@ -159,20 +174,21 @@ function DriverFields({ driver, sim, canEdit }) {
           <input type="number" min="5" max="120" value={driver.speed_kmh} disabled={!canEdit}
             onChange={e => update({ speed_kmh: +e.target.value })} />
         </Field>
-        <Field label="Max pedidos">
+        <Field label="Pedidos simultáneos (máx)">
           <input type="number" min="1" max="5" value={driver.max_orders} disabled={!canEdit}
             onChange={e => update({ max_orders: +e.target.value })} />
         </Field>
       </div>
       <div className="field-row">
-        <Field label="Calificación (1-5)">
-          <input type="number" min="1" max="5" step="0.1" value={driver.rating} disabled={!canEdit}
-            onChange={e => update({ rating: +e.target.value })} />
-        </Field>
-        <Field label="Espera idle (s)">
-          <input type="number" min="0" max="300" value={driver.idle_wait_s} disabled={!canEdit}
-            onChange={e => update({ idle_wait_s: +e.target.value })} />
-        </Field>
+      <Field label="Calificación (1-5)">
+      <input type="number" min="1" max="5" step="0.1" value={driver.rating} disabled={!canEdit}
+      onChange={e => update({ rating: +e.target.value })} />
+      </Field>
+      <Field label="Espera sin pedido (min)">
+      <input type="number" min="0" max="30" step="0.5"
+      value={+(driver.idle_wait_s / 60).toFixed(2)} disabled={!canEdit}
+      onChange={e => update({ idle_wait_s: Math.round(+e.target.value * 60) })} />
+      </Field>
       </div>
       {/* Métricas runtime */}
       {sim.simState !== 'stopped' && (
@@ -215,9 +231,10 @@ function RestaurantFields({ restaurant, sim, canEdit }) {
         <input value={restaurant.name} disabled={!canEdit}
           onChange={e => update({ name: e.target.value })} />
       </Field>
-      <Field label="Tiempo de preparación (s)">
-        <input type="number" min="30" max="3600" value={restaurant.prep_time_s} disabled={!canEdit}
-          onChange={e => update({ prep_time_s: +e.target.value })} />
+      <Field label="Tiempo de preparación (min)">
+      <input type="number" min="1" max="60" step="0.5"
+      value={+(restaurant.prep_time_s / 60).toFixed(1)} disabled={!canEdit}
+      onChange={e => update({ prep_time_s: Math.round(+e.target.value * 60) })} />
       </Field>
 
       {/* Métricas de restaurante (afectan penalización) */}
@@ -299,7 +316,7 @@ function CustomerFields({ customer, sim, canEdit }) {
         <input value={customer.name} disabled={!canEdit}
           onChange={e => update({ name: e.target.value })} />
       </Field>
-      <Field label="Distancia máx. (km)">
+      <Field label="Distancia máx. comercio→cliente (km)">
         <input type="number" min="0.5" max="50" step="0.5" value={customer.max_distance_km}
           disabled={!canEdit}
           onChange={e => update({ max_distance_km: +e.target.value })} />

@@ -119,6 +119,35 @@ export default function TopBar({ sim, addMode, onAddMode, onToggleLog, onToggleP
 
       <div style={{ flex: 1 }} />
 
+      {/* Banner de modo activo — en TopBar tiene ancho completo, sin overflow */}
+      {addMode && (
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          padding: '3px 10px',
+          borderRadius: 14,
+          background: 'rgba(47,129,247,0.12)',
+          border: '1px solid var(--accent)',
+          color: 'var(--accent)',
+          fontSize: 11,
+          fontWeight: 500,
+          flexShrink: 0,
+          whiteSpace: 'nowrap',
+        }}>
+          {{
+            driver:     '🛵 Click en mapa → agregar Driver',
+            restaurant: '🏪 Click en mapa → agregar Comercio',
+            customer:   '📍 Click en mapa → agregar Cliente',
+          }[addMode]}
+          <button
+            style={{ background: 'none', border: 'none', color: 'var(--text-2)',
+              cursor: 'pointer', fontSize: 12, padding: '0 2px', lineHeight: 1 }}
+            onClick={() => onAddMode(null)}
+          >✕</button>
+        </div>
+      )}
+
       {/* Graph status */}
       {graphStatus.pct > 0 && graphStatus.pct < 100 && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--text-1)' }}>

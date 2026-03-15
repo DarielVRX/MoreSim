@@ -164,45 +164,46 @@ function VariableRow({ variable: v, expanded, onToggle, onUpdate, onRemove }) {
             </div>
           )}
 
-          {/* Effect selector */}
-          <div className="field">
+          {v.effect === 'gate' ? (
+            <div style={{ fontSize: 11, color: 'var(--purple)',
+              background: 'rgba(188,140,255,0.08)', borderRadius: 4,
+                                  padding: '5px 8px' }}>
+                                  🔒 Gate — descalifica al driver si no se cumple. No tiene peso.
+                                  </div>
+          ) : (
+            <>
+            {/* Effect selector — igual que antes pero sin la opción 'gate' */}
+            <div className="field">
             <label>Efecto</label>
             <div style={{ display: 'flex', gap: 4 }}>
-              {EFFECT_OPTIONS.map(eff => (
-                <button
-                  key={eff}
-                  className="btn"
-                  style={{
-                    flex: 1,
-                    justifyContent: 'center',
-                    fontSize: 10,
-                    padding: '3px 6px',
-                    background: v.effect === eff ? EFFECT_COLORS[eff] + '33' : undefined,
-                    borderColor: v.effect === eff ? EFFECT_COLORS[eff] : undefined,
-                    color: v.effect === eff ? EFFECT_COLORS[eff] : undefined,
-                  }}
-                  onClick={() => onUpdate({ effect: eff })}
-                >
-                  {EFFECT_LABELS[eff]}
-                </button>
-              ))}
+            {EFFECT_OPTIONS.filter(e => e !== 'gate').map(eff => (
+              <button key={eff} className="btn"
+              style={{
+                flex: 1, justifyContent: 'center', fontSize: 10, padding: '3px 6px',
+                background: v.effect === eff ? EFFECT_COLORS[eff] + '33' : undefined,
+                borderColor: v.effect === eff ? EFFECT_COLORS[eff] : undefined,
+                color: v.effect === eff ? EFFECT_COLORS[eff] : undefined,
+              }}
+              onClick={() => onUpdate({ effect: eff })}>
+              {EFFECT_LABELS[eff]}
+              </button>
+            ))}
             </div>
-          </div>
+            </div>
 
-          {/* Weight slider */}
-          {v.effect !== 'gate' && (
+            {/* Weight slider — igual que antes */}
             <div className="field">
-              <label>Peso: <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-0)' }}>{v.weight}</span></label>
-              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                <button className="btn icon" style={{ fontSize: 10 }}
-                  onClick={() => onUpdate({ weight: Math.max(0, v.weight - 5) })}>−</button>
-                <input type="range" min="0" max="100" value={v.weight}
-                  onChange={e => onUpdate({ weight: +e.target.value })}
-                  style={{ flex: 1 }} />
-                <button className="btn icon" style={{ fontSize: 10 }}
-                  onClick={() => onUpdate({ weight: Math.min(100, v.weight + 5) })}>+</button>
-              </div>
+            <label>Peso: <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-0)' }}>{v.weight}</span></label>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            <button className="btn icon" style={{ fontSize: 10 }}
+            onClick={() => onUpdate({ weight: Math.max(0, v.weight - 5) })}>−</button>
+            <input type="range" min="0" max="100" value={v.weight}
+            onChange={e => onUpdate({ weight: +e.target.value })} style={{ flex: 1 }} />
+            <button className="btn icon" style={{ fontSize: 10 }}
+            onClick={() => onUpdate({ weight: Math.min(100, v.weight + 5) })}>+</button>
             </div>
+            </div>
+            </>
           )}
 
           {/* Formula override */}

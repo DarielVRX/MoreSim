@@ -172,16 +172,18 @@ export class MovementEngine {
 
   _tickDriver(driver, dtSim, restaurants, onDriverArrived) {
     if (driver.path.length === 0) {
-      // Sin ruta asignada
-      if (driver.status === 'idle') {
-        driver.idle_elapsed += dtSim;
+      const isWaiting = driver.status === 'idle' ||
+      (driver.status === 'waiting_at_restaurant' && driver.orders.length === 0);
+
+      if (isWaiting) {
+        driver.idle_elapsed = (driver.idle_elapsed ?? 0) + dtSim;
         driver.metrics.idle_time_s += dtSim;
         if (driver.idle_elapsed >= driver.idle_wait_s && restaurants.length > 0) {
-          // Calcular ruta libre hacia el comercio más cercano
           const nearest = nearestRestaurant(driver, restaurants);
           if (nearest) {
             this.setFreeRoute(driver, nearest.pos);
             driver.status = 'moving_free';
+            driver.idle_elapsed = 0;
           }
         }
       }

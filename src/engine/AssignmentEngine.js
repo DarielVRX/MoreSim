@@ -97,6 +97,18 @@ export class AssignmentEngine {
     const { drivers, restaurants, customers } = this._world;
     const restaurant = restaurants[order.restaurant_id];
     const customer   = customers[order.customer_id];
+    // Restricción distancia comercio→cliente
+    const distKm = haversineMeters(restaurant.pos, customer.pos) / 1000;
+    if (customer.max_distance_km > 0 && distKm > customer.max_distance_km) {
+      this._onEvent({
+        time:    simTime,
+        type:    'no_driver',
+        message: `⛔ Pedido ${order.id} cancelado — distancia ${distKm.toFixed(1)} km supera máximo del cliente (${customer.max_distance_km} km)`,
+                    orderId: order.id,
+      });
+      order.status = 'cancelled';
+      return;
+    }
     if (!restaurant || !customer) return;
 
     const driverList = Object.values(drivers);
@@ -220,7 +232,8 @@ export class AssignmentEngine {
     }
 
     if (type === 'at_free_dest') {
-      driver.status = 'waiting_at_restaurant';
+      driver.status       = 'waiting_at_restaurant';
+      driver.idle_elapsed = 0;  // ← línea nueva
     }
   }
 }

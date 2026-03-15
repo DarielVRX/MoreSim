@@ -1,18 +1,6 @@
 // src/ui/SimMap.jsx
-//
-// Mapa central con MapLibre GL. Renderiza:
-//   🛵 Drivers  — azul, flecha de dirección cuando se mueven
-//   🏪 Restaurantes — naranja, fijo
-//   📍 Clientes — verde, fijo
-//
-// Click en mapa → agrega entidad según addMode.
-// Click en marker existente → selecciona y muestra en SidePanel.
-//
-// Rutas activas de drivers se renderizan como líneas GeoJSON.
-
 import { useEffect, useRef } from 'react';
 
-// MapLibre cargado dinámicamente para no bloqueear el bundle inicial
 let _ml = null;
 function ensureML() {
   if (_ml) return Promise.resolve(_ml);
@@ -29,17 +17,14 @@ function ensureML() {
   return window.__mlPromise;
 }
 
-// Morelia centro
 const MORELIA_CENTER = [-101.1844, 19.7026];
 
-// Colores de entidades
 const COLORS = {
   driver:     '#2f81f7',
   restaurant: '#f0883e',
   customer:   '#3fb950',
 };
 
-// SVG pins inline para cada tipo
 function driverSVG(heading = 0, isMoving = false) {
   const color = isMoving ? '#2f81f7' : '#8d96a0';
   return `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24">
@@ -65,44 +50,54 @@ function customerSVG() {
   </svg>`;
 }
 
-function svgToDataURL(svg) {
-  return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
-}
-
 export default function SimMap({ sim, addMode, onAddMode, selected, onSelect }) {
-  const containerRef = useRef(null);
-  const mapRef       = useRef(null);
-  const markersRef   = useRef({});   // entityId → {marker, el}
-  const routeLayersRef = useRef({}); // driverId → source/layer ids added
+  const containerRef   = useRef(null);
+  const mapRef         = useRef(null);
+  const markersRef     = useRef({});
+  const routeLayersRef = useRef({});
 
-  const { world, simState } = sim;
+  // ── Refs para closures del click handler ──────────────────────────────────
+  // map.on('click') se registra UNA vez en useEffect([]).
+  // Sin refs vería siempre addMode=null y sim vacío del closure inicial.
+  const addModeRef  = useRef(addMode);
+  const simRef      = useRef(sim);
+  const onSelectRef = useRef(onSelect);
+  useEffect(() => { addModeRef.current  = addMode;  }, [addMode]);
+  useEffect(() => { simRef.current      = sim;      }, [sim]);
+  useEffect(() => { onSelectRef.current = onSelect; }, [onSelect]);
 
-  // ── Inicializar mapa ───────────────────────────────────────────────────────
+  const { world } = sim;
+
+  // ── Inicializar mapa UNA sola vez ─────────────────────────────────────────
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
+
     ensureML().then(ml => {
       if (!containerRef.current || mapRef.current) return;
+
       const map = new ml.Map({
-        container:         containerRef.current,
-        style:             'https://tiles.openfreemap.org/styles/bright',
-        center:            MORELIA_CENTER,
-        zoom:              13,
-        pitch:             0,
-        bearing:           0,
+        container:          containerRef.current,
+        style:              'https://tiles.openfreemap.org/styles/bright',
+        center:             MORELIA_CENTER,
+        zoom:               13,
+        pitch:              0,
+        bearing:            0,
         attributionControl: false,
-        dragRotate:        false,
+        dragRotate:         false,
       });
+
       map.addControl(new ml.NavigationControl({ showCompass: false }), 'top-right');
       map.addControl(new ml.ScaleControl({ unit: 'metric' }), 'bottom-right');
 
-      // Click en mapa → agregar entidad
+      // Lee addMode y sim desde refs — nunca del closure estático
       map.on('click', (e) => {
-        if (!addMode) return;
+        const mode = addModeRef.current;
+        const s    = simRef.current;
+        if (!mode) return;
         const pos = { lat: e.lngLat.lat, lng: e.lngLat.lng };
-        if (addMode === 'driver')     sim.addDriver(pos);
-        if (addMode === 'restaurant') sim.addRestaurant(pos);
-        if (addMode === 'customer')   sim.addCustomer(pos);
-        // No desactivar addMode para poder agregar múltiples
+        if (mode === 'driver')     s.addDriver(pos);
+        if (mode === 'restaurant') s.addRestaurant(pos);
+        if (mode === 'customer')   s.addCustomer(pos);
       });
 
       mapRef.current = map;
@@ -113,23 +108,21 @@ export default function SimMap({ sim, addMode, onAddMode, selected, onSelect }) 
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Cursor según addMode ───────────────────────────────────────────────────
+  // ── Cursor según addMode ──────────────────────────────────────────────────
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
     map.getCanvas().style.cursor = addMode ? 'crosshair' : '';
   }, [addMode]);
 
-  // ── Sincronizar markers de entidades ──────────────────────────────────────
-  // Drivers — recrear si cambian, mover si se mueven
+  // ── Markers drivers — sin deps, corre en cada render para RT ─────────────
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !_ml) return;
 
-    const drivers = Object.values(world.drivers);
+    const drivers   = Object.values(world.drivers);
     const driverIds = new Set(drivers.map(d => d.id));
 
-    // Eliminar markers de drivers que ya no existen
     for (const [id, { marker }] of Object.entries(markersRef.current)) {
       if (id.startsWith('drv-') && !driverIds.has(id)) {
         marker.remove();
@@ -137,42 +130,41 @@ export default function SimMap({ sim, addMode, onAddMode, selected, onSelect }) 
       }
     }
 
-    // Crear o actualizar markers
     for (const driver of drivers) {
-      const key = driver.id;
+      const key      = driver.id;
       const isMoving = driver.status !== 'idle';
-      const heading  = driver.path.length > 1 && driver.path_index < driver.path.length - 1
-        ? _bearingBetween(driver.path[driver.path_index], driver.path[Math.min(driver.path_index + 1, driver.path.length - 1)])
-        : 0;
+      const hasPath = driver.path && Array.isArray(driver.path) && driver.path.length > 1;
+
+      const heading = hasPath && driver.path_index < driver.path.length - 1
+      ? _bearingBetween(
+        driver.path[driver.path_index],
+        driver.path[Math.min(driver.path_index + 1, driver.path.length - 1)]
+      )
+      : 0;
 
       if (!markersRef.current[key]) {
-        // Crear nuevo marker
         const el = document.createElement('div');
-        el.innerHTML = driverSVG(heading, isMoving);
+        el.innerHTML     = driverSVG(heading, isMoving);
         el.style.cssText = 'cursor:pointer;user-select:none;';
-        el.title = driver.name;
+        el.title         = driver.name;
         el.addEventListener('click', (e) => {
           e.stopPropagation();
-          onSelect({ type: 'driver', id: driver.id });
+          onSelectRef.current({ type: 'driver', id: driver.id });
         });
-
         const marker = new _ml.Marker({ element: el, anchor: 'center' })
           .setLngLat([driver.pos.lng, driver.pos.lat])
           .addTo(map);
-
         markersRef.current[key] = { marker, el };
       } else {
-        // Mover + actualizar SVG
         const { marker, el } = markersRef.current[key];
         marker.setLngLat([driver.pos.lng, driver.pos.lat]);
         el.innerHTML = driverSVG(heading, isMoving);
       }
 
-      // Highlight si está seleccionado
-      const { el } = markersRef.current[key];
-      el.style.filter = selected?.id === driver.id ? 'drop-shadow(0 0 6px #2f81f7)' : '';
+      markersRef.current[key].el.style.filter =
+        selected?.id === driver.id ? 'drop-shadow(0 0 6px #2f81f7)' : '';
     }
-  }); // Sin deps — corre en cada render para mover markers en tiempo real
+  }); // sin deps — RT
 
   // ── Markers estáticos (restaurants + customers) ───────────────────────────
   useEffect(() => {
@@ -181,11 +173,10 @@ export default function SimMap({ sim, addMode, onAddMode, selected, onSelect }) 
 
     const entities = [
       ...Object.values(world.restaurants).map(r => ({ ...r, _type: 'restaurant' })),
-      ...Object.values(world.customers).map(c => ({ ...c, _type: 'customer' })),
+      ...Object.values(world.customers).map(c =>   ({ ...c, _type: 'customer'   })),
     ];
     const entityIds = new Set(entities.map(e => e.id));
 
-    // Eliminar markers de entidades que ya no existen
     for (const [id, { marker }] of Object.entries(markersRef.current)) {
       if ((id.startsWith('rst-') || id.startsWith('cus-')) && !entityIds.has(id)) {
         marker.remove();
@@ -193,38 +184,32 @@ export default function SimMap({ sim, addMode, onAddMode, selected, onSelect }) 
       }
     }
 
-    // Crear markers para entidades nuevas
     for (const entity of entities) {
       if (markersRef.current[entity.id]) {
-        // Actualizar highlight
-        const { el } = markersRef.current[entity.id];
-        el.style.filter = selected?.id === entity.id ? `drop-shadow(0 0 6px ${COLORS[entity._type]})` : '';
+        markersRef.current[entity.id].el.style.filter =
+          selected?.id === entity.id
+            ? `drop-shadow(0 0 6px ${COLORS[entity._type]})`
+            : '';
         continue;
       }
-
       const el = document.createElement('div');
-      el.innerHTML = entity._type === 'restaurant' ? restaurantSVG() : customerSVG();
+      el.innerHTML     = entity._type === 'restaurant' ? restaurantSVG() : customerSVG();
       el.style.cssText = 'cursor:pointer;user-select:none;';
-      el.title = entity.name;
+      el.title         = entity.name;
       el.addEventListener('click', (e) => {
         e.stopPropagation();
-        onSelect({ type: entity._type, id: entity.id });
+        onSelectRef.current({ type: entity._type, id: entity.id });
       });
-
-      // Popup con nombre
-      const popup = new _ml.Popup({ closeButton: false, offset: 20 })
-        .setText(entity.name);
-
+      const popup  = new _ml.Popup({ closeButton: false, offset: 20 }).setText(entity.name);
       const marker = new _ml.Marker({ element: el })
         .setLngLat([entity.pos.lng, entity.pos.lat])
         .setPopup(popup)
         .addTo(map);
-
       markersRef.current[entity.id] = { marker, el };
     }
   }, [world.restaurants, world.customers, selected]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Rutas de drivers (GeoJSON layers) ─────────────────────────────────────
+  // ── Rutas GeoJSON ─────────────────────────────────────────────────────────
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !map.isStyleLoaded()) return;
@@ -235,21 +220,18 @@ export default function SimMap({ sim, addMode, onAddMode, selected, onSelect }) 
       const geo   = {
         type: 'Feature', properties: {},
         geometry: {
-          type: 'LineString',
+          type:        'LineString',
           coordinates: driver.path.slice(driver.path_index).map(p => [p.lng, p.lat]),
         },
       };
-
       if (!map.getSource(srcId)) {
         map.addSource(srcId, { type: 'geojson', data: geo });
         map.addLayer({
-          id:     lyrId,
-          type:   'line',
-          source: srcId,
+          id: lyrId, type: 'line', source: srcId,
           paint: {
-            'line-color':   COLORS.driver,
-            'line-width':   2.5,
-            'line-opacity': 0.6,
+            'line-color':     COLORS.driver,
+            'line-width':     2.5,
+            'line-opacity':   0.6,
             'line-dasharray': [2, 2],
           },
           layout: { 'line-cap': 'round', 'line-join': 'round' },
@@ -259,8 +241,6 @@ export default function SimMap({ sim, addMode, onAddMode, selected, onSelect }) 
         map.getSource(srcId).setData(geo);
       }
     }
-
-    // Limpiar capas de drivers eliminados
     for (const driverId of Object.keys(routeLayersRef.current)) {
       if (!world.drivers[driverId]) {
         const srcId = `route-${driverId}`;
@@ -270,60 +250,21 @@ export default function SimMap({ sim, addMode, onAddMode, selected, onSelect }) 
         delete routeLayersRef.current[driverId];
       }
     }
-  }); // Sin deps — corre en cada render
-
-  // ── Indicador de modo de adición ──────────────────────────────────────────
-  const modeLabel = {
-    driver:     '🛵 Click para agregar Driver',
-    restaurant: '🏪 Click para agregar Comercio',
-    customer:   '📍 Click para agregar Cliente',
-  }[addMode];
+  }); // sin deps — RT
 
   return (
     <div style={{ height: '100%', width: '100%', position: 'relative' }}>
       <div ref={containerRef} style={{ height: '100%', width: '100%' }} />
 
-      {/* Modo de adición — banner */}
-      {addMode && (
-        <div style={{
-          position: 'absolute',
-          top: 10,
-          left: '50%',
-          transform: 'translateX(-50%)',
-          background: 'rgba(13,17,23,0.88)',
-          border: '1px solid var(--accent)',
-          color: 'var(--accent)',
-          borderRadius: 20,
-          padding: '5px 14px',
-          fontSize: 12,
-          fontWeight: 500,
-          zIndex: 10,
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          backdropFilter: 'blur(4px)',
-        }}>
-          {modeLabel}
-          <button
-            style={{ background: 'none', border: 'none', color: 'var(--text-2)', cursor: 'pointer', fontSize: 13 }}
-            onClick={() => onAddMode(null)}
-          >✕</button>
-        </div>
-      )}
-
       {/* Leyenda */}
       <div style={{
-        position: 'absolute',
-        top: 10,
-        right: 44,
+        position: 'absolute', top: 10, right: 44, zIndex: 10,
         background: 'rgba(13,17,23,0.82)',
         border: '1px solid var(--border)',
-        borderRadius: 6,
-        padding: '6px 10px',
-        fontSize: 11,
-        color: 'var(--text-1)',
-        zIndex: 10,
+        borderRadius: 6, padding: '6px 10px',
+        fontSize: 11, color: 'var(--text-1)',
         backdropFilter: 'blur(4px)',
+        pointerEvents: 'none',
       }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
           <span><span style={{ color: COLORS.driver }}>⬤</span> Driver</span>
@@ -334,21 +275,18 @@ export default function SimMap({ sim, addMode, onAddMode, selected, onSelect }) 
 
       {/* Atribuciones */}
       <div style={{
-        position: 'absolute',
-        bottom: 36,
-        left: 8,
-        fontSize: 10,
-        color: 'var(--text-2)',
-        zIndex: 10,
+        position: 'absolute', bottom: 36, left: 8, zIndex: 10,
+        fontSize: 10, color: 'var(--text-2)',
       }}>
-        © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer"
-          style={{ color: 'var(--text-2)' }}>OpenStreetMap</a>
+        © <a href="https://www.openstreetmap.org/copyright" target="_blank"
+          rel="noopener noreferrer" style={{ color: 'var(--text-2)' }}>
+          OpenStreetMap
+        </a>
       </div>
     </div>
   );
 }
 
-// Bearing entre dos puntos {lat,lng}
 function _bearingBetween(from, to) {
   if (!from || !to) return 0;
   const lat1 = from.lat * Math.PI / 180;
