@@ -51,51 +51,192 @@ export class AssignmentEngine {
     }
 
 
-    // ─── 2. Drivers esperando pedido listo ─────────────────────
     for (const driver of Object.values(drivers)) {
 
       if (driver.status !== 'waiting_at_restaurant') continue;
 
-      for (const orderId of driver.orders) {
+      const restaurantId = driver.current_restaurant_id;
+      if (!restaurantId) continue;
 
-        const order = orders[orderId];
+      const restaurant = restaurants[restaurantId];
 
-        if (!order) continue;
-        if (order.kitchen_status !== 'ready') continue;
-        if (order.status !== 'assigned') continue;
+      const assignedOrders = driver.orders
+      .map(id => orders[id])
+      .filter(o =>
+      o &&
+      o.status === 'assigned' &&
+      o.restaurant_id === restaurantId
+      );
 
-        const restaurant = restaurants[order.restaurant_id];
-        const customer   = customers[order.customer_id];
+      if (assignedOrders.length === 0) continue;
 
-        if (!customer) continue;
+      const readyOrders = assignedOrders.filter(o => o.kitchen_status === 'ready');
+      const preparingOrders = assignedOrders.filter(o => o.kitchen_status !== 'ready');
 
-        order.status = 'on_the_way';
-        order.picked_up_at = simTime;
+      if (readyOrders.length === 0) continue;
 
-        order.pickup_wait_s =
-        (order.pickup_wait_s ?? 0) +
-        (order.kitchen_ready_at - (order.assigned_at ?? order.kitchen_ready_at));
+      const readyOrder = readyOrders[0];
+      const customerReady = customers[readyOrder.customer_id];
+
+      if (preparingOrders.length === 0) {
+
+        readyOrder.status = 'on_the_way';
+        readyOrder.picked_up_at = simTime;
+
+        // todos los pedidos que ya están en camino
+        const deliverable = driver.orders
+        .map(id => orders[id])
+        .filter(o => o && o.status === 'on_the_way');
+
+        if (deliverable.length === 0) continue;
+
+        // elegir cliente más cercano
+        let bestOrder = null;
+        let bestDist = Infinity;
+
+        for (const o of deliverable) {
+
+          const cust = customers[o.customer_id];
+          const dist = haversineMeters(driver.pos, cust.pos);
+
+          if (dist < bestDist) {
+            bestDist = dist;
+            bestOrder = o;
+          }
+        }
+
+        const nextCustomer = customers[bestOrder.customer_id];
 
         driver.status = 'moving_to_delivery';
         driver._arrival_type = 'at_customer';
 
-        this._movement
-        .setOrderRoute(driver, driver.pos, customer.pos)
-        .then(({ distance_m }) => {
-          order.route_distance_km =
-          order.route_distance_km ?? distance_m / 1000;
-          console.log("route created", driver.id)
-        });
+        this._movement.setOrderRoute(
+          driver,
+          driver.pos,
+          nextCustomer.pos
+        );
+
+        continue;
+      }
+
+      const preparingOrder = preparingOrders[0];
+
+      const prepRemaining =
+      (restaurant?.prep_time_s ?? 600) -
+      (preparingOrder._kitchen_elapsed ?? 0);
+
+      const speed = (driver.speed_kmh * 1000) / 3600;
+
+      const distRestToCustomer =
+      haversineMeters(restaurant.pos, customerReady.pos);
+
+      const distCustomerToRest =
+      haversineMeters(customerReady.pos, restaurant.pos);
+
+      const deliverFirstTime =
+      (distRestToCustomer + distCustomerToRest) / speed;
+
+      if (prepRemaining > deliverFirstTime) {
+
+        readyOrder.status = 'on_the_way';
+        readyOrder.picked_up_at = simTime;
+
+        driver.status = 'moving_to_delivery';
+        driver._arrival_type = 'at_customer';
+
+        this._movement.setOrderRoute(
+          driver,
+          driver.pos,
+          customerReady.pos
+        );
 
         this._onEvent({
           time: simTime,
           type: 'pickup',
-          message: `🛵 ${driver.name} recogió pedido ${order.id} en ${restaurant?.name}`,
-          orderId: order.id,
+          message: `🛵 ${driver.name} entrega primero pedido ${readyOrder.id}`,
+          orderId: readyOrder.id,
           driverId: driver.id
         });
+      }
+    }
+    // ─── Evaluar desvío para recoger otro pedido ─────────────────
+    for (const driver of Object.values(drivers)) {
 
-        break;
+      if (driver.status !== 'moving_to_delivery') continue;
+
+      const orderId =
+      Object.values(orders)
+      .find(o =>
+      o.driver_id === driver.id &&
+      o.status === 'on_the_way'
+      )?.id;
+
+      const activeOrder =
+      Object.values(orders)
+      .find(o =>
+      o.driver_id === driver.id &&
+      o.status === 'on_the_way'
+      );
+      if (!activeOrder) continue;
+
+      const customer = customers[activeOrder.customer_id];
+
+      // ETA actual al cliente
+      const distToCustomer =
+      haversineMeters(driver.pos, customer.pos);
+
+      const speed = (driver.speed_kmh * 1000) / 3600;
+      const etaDirect = distToCustomer / speed;
+
+      const maxDelivery =
+      customer.max_delivery_time_s ??
+      this._world.params.max_delivery_time_s ??
+      1800;
+
+      const assignedOrders = driver.orders
+      .map(id => orders[id])
+      .filter(o =>
+      o &&
+      o.status === 'assigned' &&
+      o.kitchen_status === 'ready'
+      );
+
+      for (const order of assignedOrders) {
+
+        const rest = restaurants[order.restaurant_id];
+
+        const distToRest =
+        haversineMeters(driver.pos, rest.pos);
+
+        const distRestToCustomer =
+        haversineMeters(rest.pos, customer.pos);
+
+        const etaDetour =
+        (distToRest + distRestToCustomer) / speed;
+
+        // decisión
+        if (etaDetour <= maxDelivery) {
+
+          driver.status = 'moving_to_pickup';
+          driver._arrival_type = 'at_restaurant';
+          driver.current_restaurant_id = rest.id;
+
+          this._movement.setOrderRoute(
+            driver,
+            driver.pos,
+            rest.pos
+          );
+
+          this._onEvent({
+            time: simTime,
+            type: 'detour_pickup',
+            message: `📦 ${driver.name} recoge ${order.id} antes de entregar`,
+            orderId: order.id,
+            driverId: driver.id
+          });
+
+          break;
+        }
       }
     }
   }
@@ -242,6 +383,22 @@ export class AssignmentEngine {
 
     if (!winner) return;
 
+    const activeOrders = Array.isArray(winner.orders)
+    ? winner.orders.length
+    : 0;
+
+    const maxOrders = Number.isFinite(winner.max_orders)
+    ? winner.max_orders
+    : 1;
+
+    if (activeOrders >= maxOrders) {
+      return;
+    }
+
+    order.assignment_score = results.find(
+      r => r.driver.id === winner.id
+    )?.score ?? 0;
+
     // ─── Mutar pedido ─────────────────────────────────────────
 
     order.status = 'assigned';
@@ -267,7 +424,16 @@ export class AssignmentEngine {
 
     // ─── Mutar driver ─────────────────────────────────────────
 
-    winner.orders.push(order.id);
+    if (!winner.orders.includes(order.id)) {
+      winner.orders.push(order.id);
+    }
+
+    winner.orders.sort((a, b) => {
+      const oa = this._world.orders[a];
+      const ob = this._world.orders[b];
+
+      return (ob.assignment_score ?? 0) - (oa.assignment_score ?? 0);
+    });
 
     if (!winner.path || winner.path.length === 0 || winner.status === 'idle')
   {
@@ -275,11 +441,12 @@ export class AssignmentEngine {
 
       winner.status = 'moving_to_pickup';
       winner._arrival_type = 'at_restaurant';
+      winner.current_restaurant_id = restaurant.id;
 
       await this._movement.setOrderRoute(
         winner,
         winner.pos,
-        restaurant.pos,
+        restaurant.pos
       );
       console.log("route created", winner.id)
 
@@ -300,20 +467,14 @@ export class AssignmentEngine {
   // ─────────────────────────────────────────────────────────────
   handleDriverArrived(driver, type, simTime) {
 
-    const { orders, restaurants } = this._world;
-
+    const { orders, restaurants, customers } = this._world;
     if (type === 'at_restaurant') {
 
       driver.status = 'waiting_at_restaurant';
 
-      const orderId =
-      driver.orders.find(id => orders[id]?.status === 'assigned');
+      const restaurantId = driver.current_restaurant_id;
 
-      const order =
-      orderId ? orders[orderId] : null;
-
-      const rest =
-      order ? restaurants[order.restaurant_id] : null;
+      const rest = restaurants[restaurantId];
 
       this._onEvent({
         time: simTime,
@@ -327,41 +488,23 @@ export class AssignmentEngine {
 
     if (type === 'at_customer') {
 
-      const orderId =
-      driver.orders.find(id => orders[id]?.status === 'on_the_way');
+      const order =
+      Object.values(orders).find(o =>
+      o.driver_id === driver.id &&
+      o.status === 'on_the_way' &&
+      haversineMeters(driver.pos, customers[o.customer_id].pos) < 25
+      );
 
-      if (!orderId) return;
+      if (!order) return;
 
-      const order = orders[orderId];
+      const orderId = order.id;
 
       order.status = 'delivered';
       order.delivered_at = simTime;
+      driver._arrival_type = null;
 
       driver.orders =
       driver.orders.filter(id => id !== orderId);
-
-      if (driver.orders.length > 0) {
-
-        const nextOrderId = driver.orders[0];
-        const nextOrder = orders[nextOrderId];
-        const restaurant = restaurants[nextOrder.restaurant_id];
-
-        driver.status = 'moving_to_pickup';
-        driver._arrival_type = 'at_restaurant';
-
-        if (nextOrder && restaurant) {
-          this._movement.setOrderRoute(
-            driver,
-            driver.pos,
-            restaurant.pos
-          );
-        }
-
-      } else {
-
-        driver.status = 'idle';
-
-      }
 
       this._onEvent({
         time: simTime,
@@ -371,8 +514,133 @@ export class AssignmentEngine {
         driverId: driver.id
       });
 
-      // EVENTO: driver libera capacidad
+      // liberar capacidad para asignaciones nuevas
       this.handleDriverLoadReduced(driver.id, simTime);
+
+      // buscar entregas restantes del driver
+      const remainingDeliveries =
+      Object.values(orders)
+      .filter(o =>
+      o.driver_id === driver.id &&
+      o.status === 'on_the_way'
+      );
+
+      if (remainingDeliveries.length > 0) {
+
+        let best = null;
+        let bestDist = Infinity;
+
+        for (const o of remainingDeliveries) {
+
+          const cust = customers[o.customer_id];
+          const dist = haversineMeters(driver.pos, cust.pos);
+
+          if (dist < bestDist) {
+            bestDist = dist;
+            best = o;
+          }
+        }
+
+        const customer = customers[best.customer_id];
+
+        driver.status = 'moving_to_delivery';
+        driver._arrival_type = 'at_customer';
+
+        this._movement.setOrderRoute(
+          driver,
+          driver.pos,
+          customer.pos
+        );
+
+        return;
+      }
+
+      const remaining =
+      Object.values(orders)
+      .filter(o =>
+      o.driver_id === driver.id &&
+      (o.status === 'on_the_way' || o.status === 'assigned')
+      );
+
+      // 1️⃣ pedidos ya recogidos
+      const deliverable =
+      remaining.filter(o => o.status === 'on_the_way');
+
+      if (deliverable.length > 0) {
+
+        // elegir cliente más cercano
+        let best = null;
+        let bestDist = Infinity;
+
+        for (const o of deliverable) {
+
+          const cust = this._world.customers[o.customer_id];
+          const dist = haversineMeters(driver.pos, cust.pos);
+
+          if (dist < bestDist) {
+            bestDist = dist;
+            best = o;
+          }
+        }
+
+        const customer = this._world.customers[best.customer_id];
+
+        driver.status = 'moving_to_delivery';
+        driver._arrival_type = 'at_customer';
+
+        this._movement.setOrderRoute(
+          driver,
+          driver.pos,
+          customer.pos
+        );
+
+        return;
+
+      }
+
+      // 2️⃣ pedidos que faltan por recoger
+      const pickups =
+      Object.values(orders)
+      .filter(o =>
+      o.driver_id === driver.id &&
+      o.status === 'assigned'
+      );
+
+      let nextPickup = null;
+      let bestDist = Infinity;
+
+      for (const o of pickups) {
+
+        const rest = restaurants[o.restaurant_id];
+        const dist = haversineMeters(driver.pos, rest.pos);
+
+        if (dist < bestDist) {
+          bestDist = dist;
+          nextPickup = o;
+        }
+      }
+
+      if (nextPickup) {
+
+        const restaurant = restaurants[nextPickup.restaurant_id];
+
+        driver.status = 'moving_to_pickup';
+        driver._arrival_type = 'at_restaurant';
+        driver.current_restaurant_id = restaurant.id;
+
+        this._movement.setOrderRoute(
+          driver,
+          driver.pos,
+          restaurant.pos
+        );
+
+        return;
+
+      }
+
+      // 3️⃣ nada más que hacer
+      driver.status = 'idle';
+      return;
 
       return;
     }
