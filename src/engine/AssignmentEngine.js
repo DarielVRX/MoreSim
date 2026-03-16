@@ -143,22 +143,33 @@ export class AssignmentEngine {
 
     const maxPickupRadiusM = this._getMaxPickupRadiusMeters();
 
-    const driverList = Object.values(drivers).filter((driver) => {
-      if (!this._isDriverConnected(driver)) return false;
-      if (!this._hasValidPos(driver?.pos)) return false;
+    const viableDrivers = Object.values(drivers)
+      .map((driver) => {
+        if (!this._isDriverConnected(driver)) return null;
+        if (!this._hasValidPos(driver?.pos)) return null;
 
-      const activeOrders = Array.isArray(driver.orders) ? driver.orders.length : 0;
-      const maxOrders = Number.isFinite(driver.max_orders) ? driver.max_orders : 1;
-      if (activeOrders >= maxOrders) return false;
+        const activeOrders = Array.isArray(driver.orders) ? driver.orders.length : 0;
+        const maxOrders = Number.isFinite(driver.max_orders) ? driver.max_orders : 1;
+        if (activeOrders >= maxOrders) return null;
 
-      const distToRestaurant = haversineMeters(driver.pos, restaurant.pos);
-      if (distToRestaurant < maxPickupRadiusM) return true;
+        const viableStop = this._getClosestViableStop(driver, restaurant.pos, maxPickupRadiusM);
+        if (!viableStop) return null;
 
-      const stops = this._routingPlanner.buildStops(driver, this._world);
-      return stops.some((stop) => haversineMeters(stop.pos, restaurant.pos) < maxPickupRadiusM);
-    });
+        driver._viableStop = {
+          pos: viableStop.pos,
+          type: viableStop.type,
+          orderId: viableStop.orderId ?? null,
+          routeIndex: viableStop.routeIndex ?? null,
+        };
 
-    if (driverList.length === 0) {
+        return {
+          driver,
+          viableStop,
+        };
+      })
+      .filter(Boolean);
+
+    if (viableDrivers.length === 0) {
 
       this._onEvent({
         time: simTime,
@@ -172,51 +183,37 @@ export class AssignmentEngine {
 
     const etaRestaurantToCustomer = await this._estimateTravelTime(restaurant.pos, customer.pos, null);
 
-    // ─── ETA preliminar y ordering de candidatos ──────────────
+    // ─── ETA preliminar usando viable stop ────────────────────
 
-    const candidates = await Promise.all(driverList.map(async (driver) => {
-      const etaToRestaurant = await this._estimateTravelTime(driver.pos, restaurant.pos, driver);
-      const remainingRouteEta = this._estimateRemainingRouteEta(driver, simTime);
-      const etaTotalPrelim = remainingRouteEta + etaToRestaurant;
+    const candidates = await Promise.all(viableDrivers.map(async ({ driver, viableStop }) => {
+      const etaToViableStop = await this._estimateEtaToViableStop(driver, viableStop);
+      const etaViableToRestaurant = await this._estimateTravelTime(viableStop.pos, restaurant.pos, driver);
+      const etaToRestaurant = etaToViableStop + etaViableToRestaurant;
       const etaCandidate = etaToRestaurant + etaRestaurantToCustomer;
       const maxDeliveryTime = this._getDeliverySla(customer);
 
       return {
         driver,
+        viableStop,
         etaToRestaurant,
         etaCandidate,
-        etaTotalPrelim,
+        etaTotalPrelim: etaToRestaurant,
         slaValid: etaCandidate <= maxDeliveryTime,
       };
     }));
 
     candidates.sort((a, b) => a.etaTotalPrelim - b.etaTotalPrelim);
 
-    const slaValid = [];
-    for (const candidate of candidates) {
-      if (candidate.slaValid) slaValid.push(candidate);
-    }
-
-    const topK = Math.max(1, Math.min(5, this._world?.params?.assignment_top_k ?? 3));
-
-    let candidatesForFullEval;
-    if (slaValid.length > 0) {
-      candidatesForFullEval = slaValid.slice(0, topK);
-    } else {
-      const bestFallback = [...candidates].sort((a, b) => a.etaCandidate - b.etaCandidate)[0];
-      candidatesForFullEval = bestFallback ? [bestFallback] : [];
-    }
-
-    if (candidatesForFullEval.length === 0) return;
+    const topDrivers = candidates.slice(0, 10);
+    if (topDrivers.length === 0) return;
 
     // ─── Simulación de ruta completa para TOP_K ───────────────
 
-    const evaluated = await Promise.all(candidatesForFullEval.map(async (candidate) => {
+    const evaluated = await Promise.all(topDrivers.map(async (candidate) => {
       const simulation = await this._simulateDriverWithOrder({
         driver: candidate.driver,
         order,
-        restaurant,
-        customer,
+        viableStop: candidate.viableStop,
         simTime,
       });
 
@@ -293,9 +290,9 @@ export class AssignmentEngine {
       time: simTime,
       type: 'assignment_audit',
       message:
-        `🧪 assign ${order.id}: candidatos=${driverList.length}, ` +
-        `ganador=${winner.name}, eta_nuevo=${order.assignment_score.toFixed(1)}s, ` +
-        `sla_fast=${slaValid.length}, top_k=${candidatesForFullEval.length}`,
+        `🧪 assign ${order.id}: viables=${viableDrivers.length}, ` +
+        `top10=${topDrivers.length}, ganador=${winner.name}, ` +
+        `eta_nuevo=${order.assignment_score.toFixed(1)}s`,
       orderId: order.id,
       driverId: winner.id,
       elapsed_ms: Date.now() - startedAtMs,
@@ -515,6 +512,65 @@ export class AssignmentEngine {
     return haversineMeters(fromPos, toPos) / speedMs;
   }
 
+
+  _isSameStop(a, b) {
+    if (!a || !b) return false;
+    return a.type === b.type && (a.orderId ?? null) === (b.orderId ?? null);
+  }
+
+  _getClosestViableStop(driver, restaurantPos, maxPickupRadiusM) {
+    const candidates = [];
+
+    const distDriver = haversineMeters(driver.pos, restaurantPos);
+    if (distDriver < maxPickupRadiusM) {
+      candidates.push({
+        type: 'driver',
+        orderId: null,
+        pos: { ...driver.pos },
+        distToRestaurant: distDriver,
+      });
+    }
+
+    const stops = this._routingPlanner.buildStops(driver, this._world);
+    for (let i = 0; i < stops.length; i++) {
+      const stop = stops[i];
+      const dist = haversineMeters(stop.pos, restaurantPos);
+      if (dist >= maxPickupRadiusM) continue;
+
+      candidates.push({
+        type: stop.type,
+        orderId: stop.orderId ?? null,
+        pos: { ...stop.pos },
+        routeIndex: i,
+        distToRestaurant: dist,
+      });
+    }
+
+    if (candidates.length === 0) return null;
+    candidates.sort((a, b) => a.distToRestaurant - b.distToRestaurant);
+    return candidates[0];
+  }
+
+  async _estimateEtaToViableStop(driver, viableStop) {
+    if (!viableStop || viableStop.type === 'driver') return 0;
+
+    const stops = this._routingPlanner.buildStops(driver, this._world);
+    let eta = 0;
+    let currentPos = driver.pos;
+
+    for (let i = 0; i < stops.length; i++) {
+      const stop = stops[i];
+      eta += await this._estimateTravelTime(currentPos, stop.pos, driver);
+      const indexMatch = Number.isFinite(viableStop.routeIndex) && viableStop.routeIndex === i;
+      if (indexMatch || this._isSameStop(stop, viableStop)) {
+        return eta;
+      }
+      currentPos = stop.pos;
+    }
+
+    return 0;
+  }
+
   _buildSimulationState(driver, candidateOrderId, simTime) {
     const state = {};
     const orders = this._world.orders;
@@ -609,21 +665,48 @@ export class AssignmentEngine {
     });
   }
 
-  async _simulateDriverWithOrder({ driver, order, simTime }) {
+  async _simulateDriverWithOrder({ driver, order, viableStop, simTime }) {
     const simState = this._buildSimulationState(driver, order.id, simTime);
     let currentPos = { ...driver.pos };
     let simNow = simTime;
     let etaToNewCustomer = Infinity;
-    const maxIterations = Object.keys(simState).length * 4 + 8;
+    let reachedViable = viableStop?.type === 'driver';
+    let pickupInserted = false;
+    const routeStops = this._routingPlanner.buildStops(driver, this._world);
+    const prefixToViable = reachedViable
+      ? []
+      : routeStops.filter((_, idx) => idx <= (viableStop?.routeIndex ?? -1));
+    let prefixCursor = 0;
+    const maxIterations = Object.keys(simState).length * 6 + 10;
 
     for (let i = 0; i < maxIterations; i++) {
-      const activeStops = this._buildActiveStopsFromState(simState);
+      let activeStops = this._buildActiveStopsFromState(simState);
       if (activeStops.length === 0) break;
 
+      if (!pickupInserted && reachedViable) {
+        const restaurant = this._world.restaurants[order.restaurant_id];
+        if (restaurant?.pos) {
+          activeStops = [{ type: 'pickup', orderId: order.id, pos: restaurant.pos }, ...activeStops.filter((s) => !(s.type === 'pickup' && s.orderId === order.id))];
+        }
+      }
+
       const urgent = this._findUrgentDeliveryStops(driver, currentPos, activeStops, simState, simNow);
-      const nextStop = urgent.length > 0
-        ? this._closestStop(currentPos, urgent)
-        : this._closestStop(currentPos, activeStops);
+      let nextStop = null;
+
+      if (!reachedViable && prefixCursor < prefixToViable.length) {
+        const expected = prefixToViable[prefixCursor];
+        nextStop = activeStops.find((s) => this._isSameStop(s, expected)) ?? null;
+      }
+
+      if (!pickupInserted && reachedViable && !nextStop) {
+        nextStop = activeStops.find((s) => s.type === 'pickup' && s.orderId === order.id) ?? null;
+      }
+
+      if (!nextStop) {
+        nextStop = urgent.length > 0
+          ? this._closestStop(currentPos, urgent)
+          : this._closestStop(currentPos, activeStops);
+      }
 
       if (!nextStop) break;
 
@@ -637,13 +720,32 @@ export class AssignmentEngine {
       if (nextStop.type === 'pickup') {
         state.status = 'on_the_way';
         state.pickedUpAt = simNow;
+        if (nextStop.orderId === order.id) {
+          pickupInserted = true;
+        }
       } else {
         state.status = 'delivered';
         if (nextStop.orderId === order.id) {
           etaToNewCustomer = simNow - simTime;
         }
       }
+
+      if (!reachedViable && prefixCursor < prefixToViable.length && this._isSameStop(nextStop, prefixToViable[prefixCursor])) {
+        prefixCursor += 1;
+      }
+
+      if (!reachedViable && this._isSameStop(nextStop, viableStop)) {
+        reachedViable = true;
+      }
+
+      if (!reachedViable && prefixCursor >= prefixToViable.length && prefixToViable.length > 0) {
+        reachedViable = true;
+      }
     }
+
+    const customer = this._world.customers[order.customer_id];
+    const newOrderSla = this._getDeliverySla(customer);
+    const newOrderWithinSla = Number.isFinite(etaToNewCustomer) && etaToNewCustomer <= newOrderSla;
 
     const slaBreaches = [];
     for (const orderId of driver.orders ?? []) {
@@ -651,8 +753,8 @@ export class AssignmentEngine {
       const state = simState[orderId];
       if (!o || !state || o.status !== 'on_the_way') continue;
 
-      const customer = this._world.customers[o.customer_id];
-      const maxSla = this._getDeliverySla(customer);
+      const existingCustomer = this._world.customers[o.customer_id];
+      const maxSla = this._getDeliverySla(existingCustomer);
       if (!Number.isFinite(state.pickedUpAt)) continue;
 
       const deliveredAt = state.status === 'delivered' ? simNow : Infinity;
@@ -664,7 +766,7 @@ export class AssignmentEngine {
     }
 
     return {
-      valid: Number.isFinite(etaToNewCustomer) && slaBreaches.length === 0,
+      valid: Number.isFinite(etaToNewCustomer) && newOrderWithinSla && slaBreaches.length === 0,
       etaToNewCustomer,
       slaBreaches,
     };
