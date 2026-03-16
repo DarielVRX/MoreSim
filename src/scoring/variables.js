@@ -92,7 +92,7 @@ export const DEFAULT_VARIABLES = [
   {
     id:          'driver_rating',
     name:        'Calificación del driver',
-    enabled:     true,
+    enabled:     false,
     weight:      20,
     effect:      'maximize',
     description: 'Drivers con mejor calificación de usuarios reciben preferencia.',
@@ -109,7 +109,7 @@ export const DEFAULT_VARIABLES = [
   {
     id:          'restaurant_penalty',
     name:        'Penalización de restaurante',
-    enabled:     true,
+    enabled:     false,
     weight:      15,
     effect:      'minimize',
     description: 'Restaurantes con peores métricas reciben menor prioridad de asignación rápida.',

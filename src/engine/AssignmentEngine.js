@@ -341,6 +341,12 @@ export class AssignmentEngine {
         order.status = 'on_the_way';
         order.picked_up_at = simTime;
 
+        driver.orders.sort((a,b)=> {
+          const oa = orders[a];
+          const ob = orders[b];
+          return (ob.assignment_score ?? 0) - (oa.assignment_score ?? 0);
+        });
+
         this._onEvent({
           time: simTime,
           type: 'pickup',
@@ -350,16 +356,19 @@ export class AssignmentEngine {
         });
       }
 
-      this._routingPlanner.planNextStop(driver, this._world, 'driver_arrived_restaurant');
+      if (readyOrders.length > 0) {
+        this._routingPlanner.planNextStop(driver, this._world, 'driver_arrived_restaurant');
+      }
       return;
     }
 
     if (type === 'at_customer') {
 
       const order =
-      Object.values(orders).find(o =>
-      o.driver_id === driver.id &&
-      o.status === 'on_the_way' &&
+      driver.orders
+      .map(id => orders[id])
+      .find(o =>
+      o?.status === 'on_the_way' &&
       haversineMeters(driver.pos, customers[o.customer_id].pos) < 25
       );
 

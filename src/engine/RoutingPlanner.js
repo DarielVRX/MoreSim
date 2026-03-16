@@ -101,6 +101,20 @@ export class RoutingPlanner {
       driver.current_restaurant_id = null;
     }
 
+    const distToStop = haversineMeters(driver.pos, nextStop.pos);
+
+    if (distToStop < 5) { // metros
+      if (nextStop.type === 'pickup') {
+        driver.status = 'waiting_at_restaurant';
+        driver._arrival_type = 'at_restaurant';
+      } else {
+        driver.status = 'waiting_at_customer';
+        driver._arrival_type = 'at_customer';
+      }
+
+      return nextStop;
+    }
+
     const routeInfo = await this._movement.setOrderRoute(driver, driver.pos, nextStop.pos);
 
     driver._route_plan = {
@@ -173,7 +187,8 @@ export class RoutingPlanner {
 
       const etaDirect = haversineMeters(driver.pos, customer.pos) / speedMs;
 
-      const nearestStop = this._closestStop(driver.pos, stops);
+      const otherStops = stops.filter(s => s.orderId !== stop.orderId);
+      const nearestStop = this._closestStop(driver.pos, otherStops);
       let etaDetour = etaDirect;
 
       if (nearestStop) {
