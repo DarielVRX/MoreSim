@@ -110,6 +110,7 @@ export class AssignmentEngine {
   // ASIGNACIÓN PRINCIPAL
   // ─────────────────────────────────────────────────────────────
   async _assignOrder(order, simTime) {
+    const startedAtMs = Date.now();
 
     const { drivers, restaurants, customers } = this._world;
 
@@ -265,6 +266,18 @@ export class AssignmentEngine {
       results
     });
 
+    this._onEvent({
+      time: simTime,
+      type: 'assignment_audit',
+      message:
+        `🧪 assign ${order.id}: candidatos=${driverList.length}, ` +
+        `ganador=${winner.name}, score=${order.assignment_score.toFixed(4)}`,
+      orderId: order.id,
+      driverId: winner.id,
+      elapsed_ms: Date.now() - startedAtMs,
+      winner_eta_to_restaurant_s: winner._eta_to_restaurant_s ?? null,
+    });
+
     await this._routingPlanner.replan(winner);
   }
 
@@ -281,24 +294,48 @@ export class AssignmentEngine {
       driver.status = 'waiting_at_restaurant';
 
       const restaurantId = driver.current_restaurant_id;
-
       const rest = restaurants[restaurantId];
 
-      this._onEvent({
-        time: simTime,
-        type: 'arrived_restaurant',
-        message: `🏪 ${driver.name} llegó a ${rest?.name ?? 'comercio'} — esperando pedido`,
-        driverId: driver.id
-      });
+      this._emitRouteAudit(driver, simTime, 'restaurant');
 
-      const readyOrders = driver.orders
+      const assignedAtRestaurant = driver.orders
       .map(id => orders[id])
       .filter(o =>
         o &&
         o.status === 'assigned' &&
-        o.restaurant_id === restaurantId &&
-        o.kitchen_status === 'ready'
+        o.restaurant_id === restaurantId
       );
+
+      const readyOrders = assignedAtRestaurant
+      .filter(o => o.kitchen_status === 'ready');
+
+      const preparingOrders = assignedAtRestaurant
+      .filter(o => o.kitchen_status !== 'ready');
+
+      if (readyOrders.length > 0) {
+        this._onEvent({
+          time: simTime,
+          type: 'arrived_restaurant',
+          message:
+            `🏪 ${driver.name} llegó a ${rest?.name ?? 'comercio'} — ` +
+            `${readyOrders.length} pedido(s) listos para retirar`,
+          driverId: driver.id
+        });
+      } else {
+        const nextPrep = preparingOrders
+          .map(o => (rest?.prep_time_s ?? 600) - (o._kitchen_elapsed ?? 0))
+          .filter(v => Number.isFinite(v))
+          .reduce((min, v) => Math.min(min, v), Infinity);
+
+        this._onEvent({
+          time: simTime,
+          type: 'arrived_restaurant',
+          message:
+            `🏪 ${driver.name} llegó a ${rest?.name ?? 'comercio'} — ` +
+            `sin pedidos listos (${preparingOrders.length} preparando, ETA ${Number.isFinite(nextPrep) ? Math.max(0, nextPrep).toFixed(0) : '?'}s)`,
+          driverId: driver.id
+        });
+      }
 
       for (const order of readyOrders) {
         order.status = 'on_the_way';
@@ -313,8 +350,7 @@ export class AssignmentEngine {
         });
       }
 
-      this._routingPlanner.planNextStop(driver);
-
+      this._routingPlanner.planNextStop(driver, this._world, 'driver_arrived_restaurant');
       return;
     }
 
@@ -338,6 +374,8 @@ export class AssignmentEngine {
       driver.orders =
       driver.orders.filter(id => id !== orderId);
 
+      this._emitRouteAudit(driver, simTime, 'customer', order);
+
       this._onEvent({
         time: simTime,
         type: 'delivered',
@@ -349,7 +387,7 @@ export class AssignmentEngine {
       // liberar capacidad para asignaciones nuevas
       this.handleDriverLoadReduced(driver.id, simTime);
 
-      this._routingPlanner.planNextStop(driver);
+      this._routingPlanner.planNextStop(driver, this._world, 'driver_arrived_customer');
       return;
     }
 
@@ -358,5 +396,35 @@ export class AssignmentEngine {
       driver.status = 'waiting_at_restaurant';
       driver.idle_elapsed = 0;
     }
+  }
+
+  _emitRouteAudit(driver, simTime, destination, order = null) {
+    const plan = driver._route_plan;
+    if (!plan) return;
+
+    const actualDuration = Math.max(0, simTime - (plan.started_at ?? simTime));
+    const expectedDuration = plan.expected_duration_s;
+    const delta = Number.isFinite(expectedDuration)
+      ? actualDuration - expectedDuration
+      : null;
+
+    this._onEvent({
+      time: simTime,
+      type: 'route_audit',
+      message:
+        `⏱️ ${driver.name} ${destination} (${plan.stop_type}:${plan.order_id}) ` +
+        `real=${actualDuration.toFixed(1)}s est=${Number.isFinite(expectedDuration) ? expectedDuration.toFixed(1) : 'n/a'}s`,
+      driverId: driver.id,
+      orderId: order?.id ?? plan.order_id,
+      route_started_at: plan.started_at,
+      route_finished_at: simTime,
+      elapsed_s: actualDuration,
+      expected_s: expectedDuration,
+      delta_s: delta,
+      decision: plan.decision,
+      reason: plan.reason,
+    });
+
+    driver._route_plan = null;
   }
 }

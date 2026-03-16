@@ -47,26 +47,40 @@ export class RoutingPlanner {
   }
 
   replan(driver) {
-    return this.planNextStop(driver, this._world);
+    return this.planNextStop(driver, this._world, 'replan');
   }
 
-  async planNextStop(driver, world = this._world) {
+  async planNextStop(driver, world = this._world, reason = 'plan') {
+    const simTime = this._getSimTime();
+    const startedAtMs = Date.now();
     const stops = this.buildStops(driver, world);
 
     if (stops.length === 0) {
       driver.status = 'idle';
       driver._arrival_type = null;
       driver.current_restaurant_id = null;
+
+      this._onEvent({
+        time: simTime,
+        type: 'routing_idle',
+        message: `🧭 ${driver.name} sin stops activos → estado idle`,
+        driverId: driver.id,
+        reason,
+      });
+
       return null;
     }
 
     const urgentDeliveries = this._findUrgentDeliveries(driver, stops, world);
 
     let nextStop;
+    let decision;
     if (urgentDeliveries.length > 0) {
       nextStop = this._closestStop(driver.pos, urgentDeliveries);
+      decision = 'urgent_delivery';
     } else {
       nextStop = this._closestStop(driver.pos, stops);
+      decision = 'nearest_stop';
     }
 
     if (!nextStop) {
@@ -87,7 +101,34 @@ export class RoutingPlanner {
       driver.current_restaurant_id = null;
     }
 
-    await this._movement.setOrderRoute(driver, driver.pos, nextStop.pos);
+    const routeInfo = await this._movement.setOrderRoute(driver, driver.pos, nextStop.pos);
+
+    driver._route_plan = {
+      started_at: simTime,
+      stop_type: nextStop.type,
+      order_id: nextStop.orderId,
+      expected_duration_s: routeInfo?.duration_s ?? null,
+      expected_distance_m: routeInfo?.distance_m ?? null,
+      decision,
+      reason,
+    };
+
+    this._onEvent({
+      time: simTime,
+      type: 'routing_decision',
+      message:
+        `🧠 ${driver.name} decidió ${nextStop.type} ${nextStop.orderId} ` +
+        `(criterio=${decision}, urgent=${urgentDeliveries.length}, stops=${stops.length})`,
+      driverId: driver.id,
+      orderId: nextStop.orderId,
+      decision,
+      reason,
+      planning_elapsed_ms: Date.now() - startedAtMs,
+      expected_duration_s: routeInfo?.duration_s ?? null,
+      expected_distance_m: routeInfo?.distance_m ?? null,
+      urgent_candidates: urgentDeliveries.map(s => s.orderId),
+    });
+
     return nextStop;
   }
 
