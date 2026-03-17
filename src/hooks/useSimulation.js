@@ -464,56 +464,83 @@ function _autoSaveVars(world, variables) {
   saveLastScenario(serializeWorld(world, variables));
 }
 
+function _isValidPos(pos) {
+  return Number.isFinite(pos?.lat) && Number.isFinite(pos?.lng);
+}
+
 function _applyScenario(data, setWorld, setVariables) {
-  if (data.params || data.drivers || data.restaurants || data.customers) {
-    const loadedDrivers = Object.fromEntries(
-      Object.entries(data.drivers ?? {}).map(([id, d]) => [id, {
-        ...createDriver(d.home_pos ?? d.pos, d),
-        id,
-        home_pos: d.home_pos ?? d.pos,
-        pos: d.home_pos ?? d.pos,
-      }])
-    );
+  if (data.params || data.drivers || data.restaurants || data.customers || data.orders) {
+    setWorld(prev => {
+      const loadedDrivers = data.drivers
+        ? Object.fromEntries(
+            Object.entries(data.drivers).flatMap(([id, d]) => {
+              const basePos = _isValidPos(d.home_pos) ? d.home_pos : (_isValidPos(d.pos) ? d.pos : null);
+              if (!basePos) return [];
+              return [[id, {
+                ...createDriver(basePos, d),
+                id,
+                home_pos: basePos,
+                pos: basePos,
+              }]];
+            })
+          )
+        : prev.drivers;
 
-    const loadedRestaurants = Object.fromEntries(
-      Object.entries(data.restaurants ?? {}).map(([id, r]) => [id, {
-        ...createRestaurant(r.pos, r),
-        id,
-      }])
-    );
+      const loadedRestaurants = data.restaurants
+        ? Object.fromEntries(
+            Object.entries(data.restaurants).flatMap(([id, r]) => {
+              if (!_isValidPos(r.pos)) return [];
+              return [[id, {
+                ...createRestaurant(r.pos, r),
+                id,
+              }]];
+            })
+          )
+        : prev.restaurants;
 
-    const loadedCustomers = Object.fromEntries(
-      Object.entries(data.customers ?? {}).map(([id, c]) => [id, {
-        ...createCustomer(c.pos, c),
-        id,
-      }])
-    );
+      const loadedCustomers = data.customers
+        ? Object.fromEntries(
+            Object.entries(data.customers).flatMap(([id, c]) => {
+              if (!_isValidPos(c.pos)) return [];
+              return [[id, {
+                ...createCustomer(c.pos, c),
+                id,
+              }]];
+            })
+          )
+        : prev.customers;
 
-    const loadedOrders = Object.fromEntries(
-      Object.entries(data.orders ?? {}).map(([id, o]) => [id, {
-        ...createOrder(o.restaurant_id, o.customer_id, o),
-        id,
-      }])
-    );
+      const loadedOrders = data.orders
+        ? Object.fromEntries(
+            Object.entries(data.orders).flatMap(([id, o]) => {
+              if (!o?.restaurant_id || !o?.customer_id) return [];
+              return [[id, {
+                ...createOrder(o.restaurant_id, o.customer_id, o),
+                id,
+              }]];
+            })
+          )
+        : prev.orders;
 
-    const maxId = [
-      ...Object.keys(loadedDrivers),
-      ...Object.keys(loadedRestaurants),
-      ...Object.keys(loadedCustomers),
-      ...Object.keys(loadedOrders),
-    ].reduce((max, id) => {
-      const n = Number((id ?? '').split('-')[1]);
-      return Number.isFinite(n) ? Math.max(max, n) : max;
-    }, 0);
-    setIdCounter(maxId + 1);
+      const maxId = [
+        ...Object.keys(loadedDrivers),
+        ...Object.keys(loadedRestaurants),
+        ...Object.keys(loadedCustomers),
+        ...Object.keys(loadedOrders),
+      ].reduce((max, id) => {
+        const n = Number((id ?? '').split('-')[1]);
+        return Number.isFinite(n) ? Math.max(max, n) : max;
+      }, 0);
+      setIdCounter(maxId + 1);
 
-    setWorld(prev => ({
-      params:      data.params      ?? prev.params,
-      drivers:     loadedDrivers,
-      restaurants: loadedRestaurants,
-      customers:   loadedCustomers,
-      orders:      loadedOrders,
-    }));
+      return {
+        params:      data.params ?? prev.params,
+        drivers:     loadedDrivers,
+        restaurants: loadedRestaurants,
+        customers:   loadedCustomers,
+        orders:      loadedOrders,
+      };
+    });
   }
   if (data.variables) {
     setVariables(mergeWithSaved(data.variables));
