@@ -1,3 +1,29 @@
+import { haversineMeters } from './GraphCache.js';
+
+const OSRM_BASE_URL = 'https://router.project-osrm.org/route/v1/driving';
+
+export async function fetchOSRMRoute(from, to) {
+  const url = `${OSRM_BASE_URL}/${from.lng},${from.lat};${to.lng},${to.lat}?overview=full&geometries=geojson`;
+  const res = await fetch(url);
+
+  if (!res.ok) {
+    throw new Error(`OSRM route failed: ${res.status}`);
+  }
+
+  const data = await res.json();
+  const route = data?.routes?.[0];
+
+  if (!route || !Array.isArray(route.geometry?.coordinates)) {
+    throw new Error('OSRM route unavailable');
+  }
+
+  return {
+    path: route.geometry.coordinates.map(([lng, lat]) => ({ lat, lng })),
+    distance_m: route.distance,
+    duration_s: route.duration,
+  };
+}
+
 export class MovementEngine {
   constructor({ world, assignmentEngine, debug = true, tickRateMs = 1000 } = {}) {
     this._pendingPaths = new Map();
@@ -12,7 +38,10 @@ export class MovementEngine {
 
   _log(tag, data = {}, level = 'log') {
     if (!this._debug) return;
-    log(tag, data, level);
+    console[level](`[Movement:${tag}]`, {
+      ts: Date.now(),
+      ...data,
+    });
   }
 
   // ─────────────────────────────────────────────
