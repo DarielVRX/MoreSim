@@ -10,7 +10,7 @@ import { AssignmentEngine }  from '../engine/AssignmentEngine.js';
 import { Recorder }          from '../replay/Recorder.js';
 import { loadGraph }         from '../engine/GraphCache.js';
 import { mergeWithSaved }    from '../scoring/variables.js';
-import { createDriver, createRestaurant, createCustomer, createOrder } from '../entities/index.js';
+import { createDriver, createRestaurant, createCustomer, createOrder, setIdCounter } from '../entities/index.js';
 import {
   saveLastScenario, loadLastScenario, serializeWorld,
   saveScenario as saveToLibrary, loadLibrary, deleteScenario as deleteFromLibrary,
@@ -466,12 +466,53 @@ function _autoSaveVars(world, variables) {
 
 function _applyScenario(data, setWorld, setVariables) {
   if (data.params || data.drivers || data.restaurants || data.customers) {
+    const loadedDrivers = Object.fromEntries(
+      Object.entries(data.drivers ?? {}).map(([id, d]) => [id, {
+        ...createDriver(d.home_pos ?? d.pos, d),
+        id,
+        home_pos: d.home_pos ?? d.pos,
+        pos: d.home_pos ?? d.pos,
+      }])
+    );
+
+    const loadedRestaurants = Object.fromEntries(
+      Object.entries(data.restaurants ?? {}).map(([id, r]) => [id, {
+        ...createRestaurant(r.pos, r),
+        id,
+      }])
+    );
+
+    const loadedCustomers = Object.fromEntries(
+      Object.entries(data.customers ?? {}).map(([id, c]) => [id, {
+        ...createCustomer(c.pos, c),
+        id,
+      }])
+    );
+
+    const loadedOrders = Object.fromEntries(
+      Object.entries(data.orders ?? {}).map(([id, o]) => [id, {
+        ...createOrder(o.restaurant_id, o.customer_id, o),
+        id,
+      }])
+    );
+
+    const maxId = [
+      ...Object.keys(loadedDrivers),
+      ...Object.keys(loadedRestaurants),
+      ...Object.keys(loadedCustomers),
+      ...Object.keys(loadedOrders),
+    ].reduce((max, id) => {
+      const n = Number((id ?? '').split('-')[1]);
+      return Number.isFinite(n) ? Math.max(max, n) : max;
+    }, 0);
+    setIdCounter(maxId + 1);
+
     setWorld(prev => ({
       params:      data.params      ?? prev.params,
-      drivers:     data.drivers     ?? {},
-      restaurants: data.restaurants ?? {},
-      customers:   data.customers   ?? {},
-      orders:      {},   // los pedidos no se restauran — se vuelven a configurar
+      drivers:     loadedDrivers,
+      restaurants: loadedRestaurants,
+      customers:   loadedCustomers,
+      orders:      loadedOrders,
     }));
   }
   if (data.variables) {
