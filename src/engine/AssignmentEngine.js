@@ -44,7 +44,7 @@ export class AssignmentEngine {
       world,
       routingPlanner: this._routingPlanner,
       assignmentUtils: this._utils,
-      estimateTravelTime: (fromPos, toPos, driver) => this._etaEstimator.estimate(fromPos, toPos, driver, this._simTime),
+      estimateTravelTime: (fromPos, toPos, driver) => this._etaEstimator.estimate(fromPos, toPos, driver),
     });
 
     this._rebalancer = new RebalancingEngine({

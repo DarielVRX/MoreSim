@@ -13,7 +13,7 @@ export class RebalancingEngine {
     if (world) this._world = world;
   }
 
-  _estimateRestaurantWaitForOrder(orderId, arrivalTime, simTime) {
+  _estimateRestaurantWaitForOrder(orderId) {
     const order = this._world.orders[orderId];
     if (!order || order.kitchen_status === 'ready') return 0;
 
@@ -30,7 +30,7 @@ export class RebalancingEngine {
 
     const segmentPromises = stops.map((stop, index) => {
       const fromPos = index === 0 ? driver.pos : stops[index - 1].pos;
-      return this._etaEstimator.estimate(fromPos, stop.pos, driver, simTime);
+      return this._etaEstimator.estimate(fromPos, stop.pos, driver);
     });
 
     const segments = await Promise.all(segmentPromises);
@@ -42,7 +42,7 @@ export class RebalancingEngine {
       eta += segments[i];
 
       if (stop.type === 'pickup') {
-        eta += this._estimateRestaurantWaitForOrder(stop.orderId, simTime, simTime);
+        eta += this._estimateRestaurantWaitForOrder(stop.orderId);
       }
     }
 
