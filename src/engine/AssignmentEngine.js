@@ -154,72 +154,225 @@ export class AssignmentEngine {
   }
 
   async _attemptTailTransfers(simTime) {
-    const minGain = this._getParam('transfer_min_gain_s', 120);
+    const minGain = this._getParam('transfer_min_gain_s', 10);
+    const maxRouteEta = this._getParam('transfer_max_route_eta_s', 180);
 
-    for (const driver of Object.values(this._world.drivers)) {
-      const tailOrderId = (driver.orders ?? [])[driver.orders.length - 1];
-      if (!tailOrderId) continue;
+    const drivers = Object.values(this._world.drivers);
 
-      const order = this._world.orders[tailOrderId];
-      if (!order || order.status !== 'assigned' || order.picked_up_at != null) continue;
+    const routeCandidates = await Promise.all(
+      drivers.map(async (driver) => ({
+        driver,
+        routeEta: await this._estimateRouteEta(driver, simTime),
+        transferableTail: this._getTransferableTailOrders(driver),
+      }))
+    );
 
-      if (order._last_transfer_check && simTime - order._last_transfer_check < 30) continue;
-      order._last_transfer_check = simTime;
+    const overloadedRoutes = routeCandidates.filter((route) =>
+      Number.isFinite(route.routeEta) &&
+      route.routeEta > maxRouteEta &&
+      route.transferableTail.length > 0
+    );
 
-      const bestAlt = await this._findAlternativeAssignment(order, driver.id, simTime);
-      if (!bestAlt || !Number.isFinite(bestAlt.totalCost)) continue;
+    if (overloadedRoutes.length === 0) return;
 
-      const currentCost = await this._estimateCurrentDriverCost(order, driver, simTime);
-      if (!Number.isFinite(currentCost)) continue;
+    const proposals = await Promise.all(
+      overloadedRoutes.map((route) =>
+        this._buildGrowingPackageProposal({
+          sourceDriver: route.driver,
+          transferableTail: route.transferableTail,
+          sourceRouteEta: route.routeEta,
+          simTime,
+          minGain,
+        })
+      )
+    );
 
-      const gain = currentCost - bestAlt.totalCost;
-      if (gain < minGain) continue;
+    const validProposals = proposals
+    .filter(Boolean)
+    .sort((a, b) => b.gain - a.gain);
 
-      this._log('transfer_order', {
-        order: order.id,
-        from: driver.id,
-        to: bestAlt.driver.id,
-        gain_s: gain.toFixed(1),
+    const scheduledReplans = new Set();
+
+    for (const proposal of validProposals) {
+      const sourceDriver = this._world.drivers[proposal.sourceDriverId];
+      const targetDriver = this._world.drivers[proposal.targetDriverId];
+      if (!sourceDriver || !targetDriver) continue;
+
+      const sourceOrders = proposal.bundleOrderIds.map(id => this._world.orders[id]).filter(Boolean);
+
+      const stillTransferable = sourceOrders.every(order =>
+        order.driver_id === sourceDriver.id &&
+        order.status === 'assigned' &&
+        order.picked_up_at == null
+      );
+
+      if (!stillTransferable) continue;
+
+      const targetActive = targetDriver.orders?.length ?? 0;
+      const targetMax = Number.isFinite(targetDriver.max_orders) ? targetDriver.max_orders : 1;
+      if (targetActive + proposal.bundleOrderIds.length > targetMax) continue;
+
+      for (const order of sourceOrders) {
+        order.driver_id = targetDriver.id;
+        order.assigned_at = simTime;
+      }
+
+      this._log('transfer_bundle', {
+        from: sourceDriver.id,
+        to: targetDriver.id,
+        bundle: proposal.bundleOrderIds,
+        packageSize: proposal.bundleOrderIds.length,
+        sourceRouteEta: proposal.sourceRouteEta.toFixed(1),
+        targetRouteEta: proposal.targetRouteEta.toFixed(1),
+        gain_s: proposal.gain.toFixed(1),
       });
 
-      order.driver_id = bestAlt.driver.id;
-      order.assigned_at = simTime;
+      scheduledReplans.add(sourceDriver.id);
+      scheduledReplans.add(targetDriver.id);
       this._syncDriverOrdersFromOrderLinks();
-      await this._routingPlanner.replan(driver);
-      await this._routingPlanner.replan(bestAlt.driver);
     }
+
+    await Promise.all(
+      Array.from(scheduledReplans).map((driverId) =>
+        this._routingPlanner.replan(this._world.drivers[driverId])
+      )
+    );
   }
 
-  async _estimateCurrentDriverCost(order, driver, simTime) {
-    const evaluation = await this._simulator.evaluate({
-      topDrivers: [{ driver, viableStop: { type: 'driver' } }],
-      order,
-      simTime,
-      options: { includeCurrentOrderInState: true },
-    });
+  async _estimateRouteEta(driver, simTime) {
+    const stops = this._routingPlanner.buildStops(driver, this._world);
+    if (stops.length === 0) return 0;
 
-    return evaluation[0]?.totalCost ?? Infinity;
+    let eta = 0;
+    let currentPos = driver.pos;
+
+    for (const stop of stops) {
+      const travel = await this._finder._estimateTravelTime(currentPos, stop.pos, driver);
+      eta += travel;
+
+      if (stop.type === 'pickup') {
+        const wait = this._estimateRestaurantWaitForOrder(stop.orderId, simTime + eta, simTime);
+        eta += wait;
+      }
+
+      currentPos = stop.pos;
+    }
+
+    return eta;
   }
 
-  async _findAlternativeAssignment(order, excludedDriverId, simTime) {
+  _estimateRestaurantWaitForOrder(orderId, arrivalTime, simTime) {
+    const order = this._world.orders[orderId];
+    if (!order || order.kitchen_status === 'ready') return 0;
+
     const restaurant = this._world.restaurants[order.restaurant_id];
-    const customer = this._world.customers[order.customer_id];
-    if (!restaurant || !customer) return null;
+    const prepTime = restaurant?.prep_time_s ?? 600;
+    const cooked = order._kitchen_elapsed ?? 0;
+    const remainingNow = Math.max(0, prepTime - cooked);
+    const elapsedUntilArrival = Math.max(0, arrivalTime - simTime);
+    return Math.max(0, remainingNow - elapsedUntilArrival);
+  }
 
-    const { topDrivers } = await this._finder.find(order, { restaurant, customer });
-    const alternatives = topDrivers.filter(c => c.driver.id !== excludedDriverId);
-    if (alternatives.length === 0) return null;
+  _getTransferableTailOrders(driver) {
+    const orderIds = driver.orders ?? [];
+    const tail = [];
 
-    const evaluated = await this._simulator.evaluate({
-      topDrivers: alternatives,
-      order,
-      simTime,
-      options: { includeCurrentOrderInState: false },
-    });
+    for (let i = orderIds.length - 1; i >= 0; i--) {
+      const order = this._world.orders[orderIds[i]];
+      if (!order) continue;
 
-    return evaluated
-    .filter(item => item.validExisting)
-    .sort((a, b) => a.totalCost - b.totalCost)[0] ?? null;
+      const transferable =
+      order.driver_id === driver.id &&
+      order.status === 'assigned' &&
+      order.picked_up_at == null;
+
+      if (!transferable) break;
+
+      tail.push(order.id);
+    }
+
+    return tail;
+  }
+
+  async _buildGrowingPackageProposal({ sourceDriver, transferableTail, sourceRouteEta, simTime, minGain }) {
+    for (let size = 1; size <= transferableTail.length; size++) {
+      const bundleOrderIds = transferableTail.slice(0, size);
+
+      const bestRecipient = await this._findBestRecipientForBundle({
+        sourceDriver,
+        bundleOrderIds,
+        simTime,
+      });
+
+      if (!bestRecipient) continue;
+      if (bestRecipient.gain < minGain) continue;
+
+      return {
+        sourceDriverId: sourceDriver.id,
+        targetDriverId: bestRecipient.driver.id,
+        bundleOrderIds,
+        sourceRouteEta,
+        targetRouteEta: bestRecipient.routeEta,
+        gain: bestRecipient.gain,
+      };
+    }
+
+    return null;
+  }
+
+  async _findBestRecipientForBundle({ sourceDriver, bundleOrderIds, simTime }) {
+    const sourceCost = await this._estimateBundleCostForDriver(bundleOrderIds, sourceDriver, simTime, true);
+    if (!Number.isFinite(sourceCost)) return null;
+
+    const recipients = Object.values(this._world.drivers)
+    .filter(driver => driver.id !== sourceDriver.id);
+
+    let best = null;
+
+    for (const recipient of recipients) {
+      const activeOrders = recipient.orders?.length ?? 0;
+      const maxOrders = Number.isFinite(recipient.max_orders) ? recipient.max_orders : 1;
+      if (activeOrders + bundleOrderIds.length > maxOrders) continue;
+
+      const recipientCost = await this._estimateBundleCostForDriver(bundleOrderIds, recipient, simTime, false);
+      if (!Number.isFinite(recipientCost)) continue;
+
+      const gain = sourceCost - recipientCost;
+      if (!best || gain > best.gain) {
+        best = { driver: recipient, gain };
+      }
+    }
+
+    if (!best) return null;
+
+    const routeEta = await this._estimateRouteEta(best.driver, simTime);
+    return {
+      ...best,
+      routeEta,
+    };
+  }
+
+  async _estimateBundleCostForDriver(bundleOrderIds, driver, simTime, includeCurrentOrderInState) {
+    let total = 0;
+
+    for (const orderId of bundleOrderIds) {
+      const order = this._world.orders[orderId];
+      if (!order) return Infinity;
+
+      const evaluation = await this._simulator.evaluate({
+        topDrivers: [{ driver, viableStop: { type: 'driver' } }],
+        order,
+        simTime,
+        options: { includeCurrentOrderInState },
+      });
+
+      const result = evaluation[0];
+      if (!result?.validExisting || !Number.isFinite(result.totalCost)) return Infinity;
+
+      total += result.totalCost;
+    }
+
+    return total;
   }
 
   handleOrderCreated(orderId, simTime) {
