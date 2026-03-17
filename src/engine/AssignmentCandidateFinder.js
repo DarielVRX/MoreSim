@@ -42,8 +42,8 @@ export class AssignmentCandidateFinder {
     return radiusKm * 1000;
   }
 
-  _estimateTravelTime(fromPos, toPos, driver = null, simTime = 0, traceId = null) {
-    const duration_s = this._etaEstimator.estimate(fromPos, toPos, driver, simTime);
+  _estimateTravelTime(fromPos, toPos, driver = null, traceId = null) {
+    const duration_s = this._etaEstimator.estimate(fromPos, toPos, driver);
     this._log('eta', { traceId, duration_s, fromPos, toPos });
     return duration_s;
   }
@@ -80,22 +80,22 @@ export class AssignmentCandidateFinder {
     return candidates[0];
   }
 
-  _approximateCandidateScore(driver, viableStop, restaurant, customer, simTime) {
+  _approximateCandidateScore(driver, viableStop, restaurant, customer) {
     const activeOrders = driver.orders?.length ?? 0;
     const loadPenalty = activeOrders * 180;
-    const etaToRestaurant = this._estimateTravelTime(viableStop.pos, restaurant.pos, driver, simTime);
-    const etaRestaurantToCustomer = this._estimateTravelTime(restaurant.pos, customer.pos, driver, simTime);
+    const etaToRestaurant = this._estimateTravelTime(viableStop.pos, restaurant.pos, driver);
+    const etaRestaurantToCustomer = this._estimateTravelTime(restaurant.pos, customer.pos, driver);
     const totalEta = etaToRestaurant + etaRestaurantToCustomer;
     return totalEta + loadPenalty;
   }
 
-  async _estimateEtaToViableStop(driver, viableStop, traceId, simTime) {
+  async _estimateEtaToViableStop(driver, viableStop, traceId) {
     if (!viableStop || viableStop.type === 'driver') return 0;
 
     const stops = this._routingPlanner.buildStops(driver, this._world);
     const segmentPromises = stops.map((stop, i) => {
       const fromPos = i === 0 ? driver.pos : stops[i - 1].pos;
-      return this._estimateTravelTime(fromPos, stop.pos, driver, simTime, traceId);
+      return this._estimateTravelTime(fromPos, stop.pos, driver, traceId);
     });
     const segmentTimes = await Promise.all(segmentPromises);
 
@@ -112,7 +112,7 @@ export class AssignmentCandidateFinder {
     return 0;
   }
 
-  async find(order, { restaurant, customer, simTime = 0 }) {
+  async find(order, { restaurant, customer }) {
     const traceId = `order_${order.id}_${Date.now()}`;
     const maxPickupRadiusM = this._getMaxPickupRadiusMeters();
     const hardTopK = Math.max(1, this._world?.params?.assignment_hard_top_k ?? 5);
@@ -129,7 +129,7 @@ export class AssignmentCandidateFinder {
         const viableStop = this._getClosestViableStop(driver, restaurant.pos, maxPickupRadiusM, traceId);
         if (!viableStop) return null;
 
-        const approxScore = this._approximateCandidateScore(driver, viableStop, restaurant, customer, simTime);
+        const approxScore = this._approximateCandidateScore(driver, viableStop, restaurant, customer);
         return { driver, viableStop, approxScore };
       })
       .filter(Boolean)
@@ -140,9 +140,9 @@ export class AssignmentCandidateFinder {
     const candidates = await Promise.all(
       reducedCandidates.map(async ({ driver, viableStop, approxScore }) => {
         const [etaToViableStop, etaViableToRestaurant, etaRestaurantToCustomer] = await Promise.all([
-          this._estimateEtaToViableStop(driver, viableStop, traceId, simTime),
-          this._estimateTravelTime(viableStop.pos, restaurant.pos, driver, simTime, traceId),
-          this._estimateTravelTime(restaurant.pos, customer.pos, driver, simTime, traceId),
+          this._estimateEtaToViableStop(driver, viableStop, traceId),
+          this._estimateTravelTime(viableStop.pos, restaurant.pos, driver, traceId),
+          this._estimateTravelTime(restaurant.pos, customer.pos, driver, traceId),
         ]);
 
         const etaToRestaurant = etaToViableStop + etaViableToRestaurant;
