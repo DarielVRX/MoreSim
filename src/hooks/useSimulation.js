@@ -199,6 +199,9 @@ export function useSimulation() {
           delivered_at:    null,
           pickup_wait_s:   0,
           score_breakdown: null,
+          retry_count:     0,
+          next_retry_at:   0,
+          last_transferred_at: null,
           _kitchen_elapsed: 0,
         }])
       );
