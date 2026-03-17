@@ -1,5 +1,3 @@
-// src/engine/RoutingPlanner.js
-
 import { haversineMeters } from './GraphCache.js';
 
 export class RoutingPlanner {
@@ -56,6 +54,7 @@ export class RoutingPlanner {
     const stops = this.buildStops(driver, world);
 
     if (stops.length === 0) {
+      console.log(`[Planner] Driver ${driver.name} sin paradas pendientes. Pasando a IDLE.`);
       driver.status = 'idle';
       driver._arrival_type = null;
       driver.current_restaurant_id = null;
@@ -76,6 +75,7 @@ export class RoutingPlanner {
     let nextStop;
     let decision;
     if (urgentDeliveries.length > 0) {
+      console.log(`[Planner] ${driver.name}: Priorizando entrega urgente (${urgentDeliveries.length} candidatos)`);
       nextStop = this._closestStop(driver.pos, urgentDeliveries);
       decision = 'urgent_delivery';
     } else {
@@ -102,8 +102,10 @@ export class RoutingPlanner {
     }
 
     const distToStop = haversineMeters(driver.pos, nextStop.pos);
+    console.log(`[Planner] Decision para ${driver.name}: ${nextStop.type} pedido ${nextStop.orderId} a ${distToStop.toFixed(1)}m. Criterio: ${decision}`);
 
-    if (distToStop < 5) { // metros
+    if (distToStop < 5) {
+      console.log(`[Planner] ${driver.name} ya está en la parada o muy cerca (${distToStop.toFixed(1)}m).`);
       if (nextStop.type === 'pickup') {
         driver.status = 'waiting_at_restaurant';
         driver._arrival_type = 'at_restaurant';
@@ -131,16 +133,16 @@ export class RoutingPlanner {
       time: simTime,
       type: 'routing_decision',
       message:
-        `🧠 ${driver.name} decidió ${nextStop.type} ${nextStop.orderId} ` +
-        `(criterio=${decision}, urgent=${urgentDeliveries.length}, stops=${stops.length})`,
-      driverId: driver.id,
-      orderId: nextStop.orderId,
-      decision,
-      reason,
-      planning_elapsed_ms: Date.now() - startedAtMs,
-      expected_duration_s: routeInfo?.duration_s ?? null,
-      expected_distance_m: routeInfo?.distance_m ?? null,
-      urgent_candidates: urgentDeliveries.map(s => s.orderId),
+      `🧠 ${driver.name} decidió ${nextStop.type} ${nextStop.orderId} ` +
+      `(criterio=${decision}, urgent=${urgentDeliveries.length}, stops=${stops.length})`,
+                  driverId: driver.id,
+                  orderId: nextStop.orderId,
+                  decision,
+                  reason,
+                  planning_elapsed_ms: Date.now() - startedAtMs,
+                  expected_duration_s: routeInfo?.duration_s ?? null,
+                  expected_distance_m: routeInfo?.distance_m ?? null,
+                  urgent_candidates: urgentDeliveries.map(s => s.orderId),
     });
 
     return nextStop;
@@ -177,11 +179,7 @@ export class RoutingPlanner {
         return false;
       }
 
-      const maxDeliveryTime =
-        customer.max_delivery_time_s ??
-        world.params?.max_delivery_time_s ??
-        1800;
-
+      const maxDeliveryTime = customer.max_delivery_time_s ?? world.params?.max_delivery_time_s ?? 1800;
       const elapsed = Math.max(0, simTime - (order.picked_up_at ?? simTime));
       const remaining = maxDeliveryTime - elapsed;
 
@@ -192,13 +190,16 @@ export class RoutingPlanner {
       let etaDetour = etaDirect;
 
       if (nearestStop) {
-        const detourDist =
-          haversineMeters(driver.pos, nearestStop.pos) +
-          haversineMeters(nearestStop.pos, customer.pos);
+        const detourDist = haversineMeters(driver.pos, nearestStop.pos) + haversineMeters(nearestStop.pos, customer.pos);
         etaDetour = detourDist / speedMs;
       }
 
-      return etaDirect >= remaining || etaDetour >= remaining;
+      const isUrgent = etaDirect >= remaining || etaDetour >= remaining;
+      if (isUrgent) {
+        console.warn(`[Planner] URGENTE: Pedido ${order.id} requiere entrega inmediata. Restante: ${remaining.toFixed(1)}s, ETA Desvío: ${etaDetour.toFixed(1)}s`);
+      }
+
+      return isUrgent;
     });
   }
 }

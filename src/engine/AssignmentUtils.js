@@ -15,7 +15,8 @@ export class AssignmentUtils {
 
   getSpeedMs(driver) {
     const speedKmh = Number.isFinite(driver?.speed_kmh) ? driver.speed_kmh : 30;
-    return Math.max(1, (speedKmh * 1000) / 3600);
+    const speedMs = Math.max(1, (speedKmh * 1000) / 3600);
+    return speedMs;
   }
 
   getDeliverySla(customer) {
@@ -42,24 +43,26 @@ export class AssignmentUtils {
     const actualDuration = Math.max(0, simTime - (plan.started_at ?? simTime));
     const expectedDuration = plan.expected_duration_s;
     const delta = Number.isFinite(expectedDuration)
-      ? actualDuration - expectedDuration
-      : null;
+    ? actualDuration - expectedDuration
+    : null;
+
+    console.log(`[Audit] ${driver.name} completó ${plan.stop_type}. Real: ${actualDuration.toFixed(1)}s, Est: ${expectedDuration?.toFixed(1) ?? 'n/a'}s, Delta: ${delta?.toFixed(1) ?? 'n/a'}s`);
 
     this._onEvent({
       time: simTime,
       type: 'route_audit',
       message:
-        `⏱️ ${driver.name} ${destination} (${plan.stop_type}:${plan.order_id}) ` +
-        `real=${actualDuration.toFixed(1)}s est=${Number.isFinite(expectedDuration) ? expectedDuration.toFixed(1) : 'n/a'}s`,
-      driverId: driver.id,
-      orderId: order?.id ?? plan.order_id,
-      route_started_at: plan.started_at,
-      route_finished_at: simTime,
-      elapsed_s: actualDuration,
-      expected_s: expectedDuration,
-      delta_s: delta,
-      decision: plan.decision,
-      reason: plan.reason,
+      `⏱️ ${driver.name} ${destination} (${plan.stop_type}:${plan.order_id}) ` +
+      `real=${actualDuration.toFixed(1)}s est=${Number.isFinite(expectedDuration) ? expectedDuration.toFixed(1) : 'n/a'}s`,
+                  driverId: driver.id,
+                  orderId: order?.id ?? plan.order_id,
+                  route_started_at: plan.started_at,
+                  route_finished_at: simTime,
+                  elapsed_s: actualDuration,
+                  expected_s: expectedDuration,
+                  delta_s: delta,
+                  decision: plan.decision,
+                  reason: plan.reason,
     });
 
     driver._route_plan = null;

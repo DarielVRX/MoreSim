@@ -18,8 +18,9 @@ export class KitchenEngine {
 
       order._kitchen_elapsed = (order._kitchen_elapsed ?? 0) + dtSim;
       const restaurant = restaurants[order.restaurant_id];
+      const prepTime = restaurant?.prep_time_s ?? 600;
 
-      if (order._kitchen_elapsed >= (restaurant?.prep_time_s ?? 600)) {
+      if (order._kitchen_elapsed >= prepTime) {
         order.kitchen_status = 'ready';
         order.kitchen_ready_at = simTime;
 
@@ -29,6 +30,7 @@ export class KitchenEngine {
           message: `🍳 ${restaurant?.name ?? order.restaurant_id} — Pedido ${order.id} listo para retiro`,
           orderId: order.id,
         });
+        console.log(`[Kitchen] Pedido ${order.id} listo tras ${order._kitchen_elapsed.toFixed(1)}s`);
       }
     }
   }
