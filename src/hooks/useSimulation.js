@@ -102,6 +102,9 @@ export function useSimulation() {
       // Tick del assignment engine
       if (assignRef.current) {
         assignRef.current._world = w;
+        assignRef.current._finder?.update({
+          world: w
+        });
         assignRef.current.tick(dtSim, st);
       }
 

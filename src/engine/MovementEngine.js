@@ -102,7 +102,10 @@ export class MovementEngine {
   // 🔥 INTERNAL LOOP (CLAVE)
   // ─────────────────────────────────────────────
   _tickInternal(dtSim) {
+    this._log('tick_this._world return', { drivers: drivers.length });
     if (!this._world) return;
+
+    this._log('tick_called', { drivers: drivers.length });
 
     const drivers = Object.values(this._world.drivers);
     const restaurants = Object.values(this._world.restaurants);
@@ -128,10 +131,6 @@ export class MovementEngine {
 
   // ─────────────────────────────────────────────
   tick(drivers, dtSim, restaurants, onDriverArrived) {
-    this._log('tick_start', {
-      drivers: drivers.length,
-      dtSim,
-    });
 
     for (const driver of drivers) {
       this._tickDriver(driver, dtSim, restaurants, onDriverArrived);

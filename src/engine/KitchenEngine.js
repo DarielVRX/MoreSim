@@ -1,4 +1,6 @@
 export class KitchenEngine {
+
+
   constructor({ world, onEvent }) {
     this._world = world;
     this._onEvent = onEvent ?? (() => {});
@@ -13,8 +15,11 @@ export class KitchenEngine {
     const { orders, restaurants } = this._world;
 
     for (const order of Object.values(orders)) {
-      if (order.status !== 'assigned') continue;
-      if (order.kitchen_status !== 'preparing') continue;
+      const isCooking =
+      order.kitchen_status === 'preparing' &&
+      order.picked_up_at == null;
+
+      if (!isCooking) continue;
 
       order._kitchen_elapsed = (order._kitchen_elapsed ?? 0) + dtSim;
       const restaurant = restaurants[order.restaurant_id];

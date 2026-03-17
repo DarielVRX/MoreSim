@@ -86,6 +86,22 @@ export class RoutingPlanner {
       reason,
     });
 
+    // 🔥 BLOQUEO DE REPLAN (CRÍTICO)
+    const isMoving =
+    driver.path?.length > 0 &&
+    driver.path_index < driver.path.length - 1;
+
+    if (isMoving && reason !== 'replan') {
+      this._log('skip_replan_active_route', {
+        traceId,
+        driver: driver.name,
+        pathIndex: driver.path_index,
+        pathLength: driver.path.length,
+        reason,
+      });
+      return null;
+    }
+
     if (stops.length === 0) {
       this._log('idle', { traceId, driver: driver.name });
 
