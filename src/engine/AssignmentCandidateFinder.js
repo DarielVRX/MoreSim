@@ -210,6 +210,13 @@ export class AssignmentCandidateFinder {
       radius_m: maxPickupRadiusM,
     });
 
+    this._log('drivers_deep_inspect', {
+      traceId,
+      driversRaw: this._world.drivers,
+      keys: Object.keys(this._world.drivers || {}),
+              type: typeof this._world.drivers,
+    });
+
     // ─── Estadísticas de descarte ───
     const discardStats = {
       not_connected: 0,
