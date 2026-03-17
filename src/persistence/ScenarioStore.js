@@ -108,6 +108,15 @@ export function serializeWorld(world, variables) {
         max_distance_km: c.max_distance_km,
       }])
     ),
+    orders: Object.fromEntries(
+      Object.entries(world.orders).map(([id, o]) => [id, {
+        id: o.id,
+        restaurant_id: o.restaurant_id,
+        customer_id: o.customer_id,
+        amount_cents: o.amount_cents,
+        trigger: o.trigger,
+      }])
+    ),
     variables: variables.map(v => ({
       id: v.id, enabled: v.enabled, weight: v.weight,
       formula_override: v.formula_override ?? null,
