@@ -64,6 +64,7 @@ export class AssignmentEngine {
     this._simulator._world = this._world;
 
     this._kitchen.tick(dtSim, simTime);
+    this._syncWaitingDrivers(simTime, dtSim);
 
     // 🔥 retry periódico (no duplica por _assigning)
     const pending = Object.values(this._world.orders)
@@ -71,6 +72,39 @@ export class AssignmentEngine {
 
     for (const order of pending) {
       this._tryAssign(order, simTime);
+    }
+  }
+
+  _syncWaitingDrivers(simTime, dtSim) {
+    const { drivers, orders, restaurants } = this._world;
+
+    for (const driver of Object.values(drivers)) {
+      if (driver.status !== 'waiting_at_restaurant') continue;
+
+      const waitingOrders = (driver.orders ?? [])
+      .map(orderId => orders[orderId])
+      .filter(order =>
+      order &&
+      order.status === 'assigned' &&
+      order.kitchen_status !== 'ready'
+      );
+
+      for (const order of waitingOrders) {
+        order.pickup_wait_s = (order.pickup_wait_s ?? 0) + dtSim;
+      }
+
+      const hasReadyOrder = (driver.orders ?? [])
+      .map(orderId => orders[orderId])
+      .some(order =>
+      order &&
+      order.status === 'assigned' &&
+      order.kitchen_status === 'ready' &&
+      restaurants[order.restaurant_id]
+      );
+
+      if (hasReadyOrder) {
+        this.handleDriverArrived(driver, 'at_restaurant', simTime);
+      }
     }
   }
 
@@ -208,7 +242,10 @@ export class AssignmentEngine {
       o.picked_up_at == null
       );
 
-      if (readyOrders.length === 0) return;
+      if (readyOrders.length === 0) {
+        driver.status = 'waiting_at_restaurant';
+        return;
+      }
 
       for (const order of readyOrders) {
 
