@@ -112,7 +112,7 @@ export class AssignmentCandidateFinder {
     return 0;
   }
 
-  async find(order, { restaurant, customer, simTime = 0 }) {
+  async find(order, { restaurant, customer }) {
     const traceId = `order_${order.id}_${Date.now()}`;
     const maxPickupRadiusM = this._getMaxPickupRadiusMeters();
     const hardTopK = Math.max(1, this._world?.params?.assignment_hard_top_k ?? 5);

@@ -232,7 +232,7 @@ export class AssignmentEngine {
       return true;
     }
 
-    const { viableDrivers, topDrivers } = await this._finder.find(order, { restaurant, customer, simTime });
+    const { viableDrivers, topDrivers } = await this._finder.find(order, { restaurant, customer });
 
     // filtrar por capacidad REAL (con reservas)
     const capacityFiltered = topDrivers.filter(({ driver }) => {
