@@ -44,7 +44,7 @@ export class AssignmentEngine {
       world,
       routingPlanner: this._routingPlanner,
       assignmentUtils: this._utils,
-      estimateTravelTime: (fromPos, toPos, driver) => this._etaEstimator.estimate(fromPos, toPos, driver, this._simTime),
+      estimateTravelTime: (fromPos, toPos, driver) => this._etaEstimator.estimate(fromPos, toPos, driver),
     });
 
     this._rebalancer = new RebalancingEngine({
@@ -232,7 +232,7 @@ export class AssignmentEngine {
       return true;
     }
 
-    const { viableDrivers, topDrivers } = await this._finder.find(order, { restaurant, customer, simTime });
+    const { viableDrivers, topDrivers } = await this._finder.find(order, { restaurant, customer });
 
     // filtrar por capacidad REAL (con reservas)
     const capacityFiltered = topDrivers.filter(({ driver }) => {
