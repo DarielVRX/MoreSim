@@ -169,7 +169,7 @@ export class RebalancingEngine {
     const multiplier = this._getParam('sim_multiplier', 1);
 
     const maxRouteEta =
-    this._getParam('transfer_max_route_eta_s', 180) / Math.sqrt(multiplier);
+    this._getParam('transfer_max_route_eta_s', 180);
 
     let transfers = 0;
     const maxIterations = this._getParam('transfer_max_iterations', 5);
