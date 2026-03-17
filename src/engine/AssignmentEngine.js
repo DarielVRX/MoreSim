@@ -47,6 +47,30 @@ export class AssignmentEngine {
     console.log(`[Engine:${tag}]`, data);
   }
 
+  _getParam(name, fallback) {
+    const value = this._world?.params?.[name] ?? this._variables?.[name];
+    return Number.isFinite(value) ? value : fallback;
+  }
+
+  _syncDriverOrdersFromOrderLinks() {
+    const byDriver = {};
+    for (const driver of Object.values(this._world.drivers)) {
+      byDriver[driver.id] = [];
+    }
+
+    for (const order of Object.values(this._world.orders)) {
+      if (!order?.driver_id) continue;
+      if (!['assigned', 'on_the_way'].includes(order.status)) continue;
+      if (!byDriver[order.driver_id]) continue;
+      byDriver[order.driver_id].push(order.id);
+    }
+
+    for (const driver of Object.values(this._world.drivers)) {
+      const nextOrders = byDriver[driver.id] ?? [];
+      driver.orders = nextOrders;
+    }
+  }
+
   updateVariables(vars) {
     this._variables = vars;
     this._utils.update({ variables: vars });
@@ -56,34 +80,157 @@ export class AssignmentEngine {
   tick(dtSim, simTime) {
     this._simTime = simTime;
 
-    // 🔥 sync world en todos los módulos
     this._routingPlanner.updateWorld(this._world);
     this._kitchen.update({ world: this._world });
     this._finder.update({ world: this._world });
     this._utils.update({ world: this._world });
     this._simulator._world = this._world;
 
+    this._syncDriverOrdersFromOrderLinks();
     this._kitchen.tick(dtSim, simTime);
+    this._syncWaitingDrivers(simTime, dtSim);
+    this._attemptTailTransfers(simTime);
 
-    // 🔥 retry periódico (no duplica por _assigning)
-    const pending = Object.values(this._world.orders)
-    .filter(o => o.status === 'queued' && o.triggered);
+    const pending = this._buildRetryQueue(simTime);
 
     for (const order of pending) {
       this._tryAssign(order, simTime);
     }
   }
 
+  _buildRetryQueue(simTime) {
+    const orders = Object.values(this._world.orders)
+    .filter(o => o.status === 'queued' && o.triggered);
+
+    return orders.sort((a, b) => {
+      const sa = this._getRetryPriority(a, simTime);
+      const sb = this._getRetryPriority(b, simTime);
+      return sb - sa;
+    });
+  }
+
+  _getRetryPriority(order, simTime) {
+    const age = Math.max(0, simTime - (order.created_at ?? order.triggered_at ?? 0));
+    const customer = this._world.customers[order.customer_id];
+    const maxSla = this._utils.getDeliverySla(customer);
+    const waitedFromAssign = Number.isFinite(order.assigned_at)
+    ? Math.max(0, simTime - order.assigned_at)
+    : 0;
+
+    const urgency = Math.max(0, waitedFromAssign - maxSla);
+    return age + urgency * 2;
+  }
+
+  _syncWaitingDrivers(simTime, dtSim) {
+    const { drivers, orders } = this._world;
+
+    for (const driver of Object.values(drivers)) {
+      if (driver.status !== 'waiting_at_restaurant') continue;
+
+      const waitingOrders = (driver.orders ?? [])
+      .map(orderId => orders[orderId])
+      .filter(order =>
+      order &&
+      order.status === 'assigned' &&
+      order.kitchen_status !== 'ready'
+      );
+
+      for (const order of waitingOrders) {
+        order.pickup_wait_s = (order.pickup_wait_s ?? 0) + dtSim;
+      }
+
+      const hasReadyOrder = (driver.orders ?? [])
+      .map(orderId => orders[orderId])
+      .some(order =>
+      order &&
+      order.status === 'assigned' &&
+      order.kitchen_status === 'ready'
+      );
+
+      if (hasReadyOrder) {
+        this.handleDriverArrived(driver, 'at_restaurant', simTime);
+      }
+    }
+  }
+
+  async _attemptTailTransfers(simTime) {
+    const minGain = this._getParam('transfer_min_gain_s', 120);
+
+    for (const driver of Object.values(this._world.drivers)) {
+      const tailOrderId = (driver.orders ?? [])[driver.orders.length - 1];
+      if (!tailOrderId) continue;
+
+      const order = this._world.orders[tailOrderId];
+      if (!order || order.status !== 'assigned' || order.picked_up_at != null) continue;
+
+      if (order._last_transfer_check && simTime - order._last_transfer_check < 30) continue;
+      order._last_transfer_check = simTime;
+
+      const bestAlt = await this._findAlternativeAssignment(order, driver.id, simTime);
+      if (!bestAlt || !Number.isFinite(bestAlt.totalCost)) continue;
+
+      const currentCost = await this._estimateCurrentDriverCost(order, driver, simTime);
+      if (!Number.isFinite(currentCost)) continue;
+
+      const gain = currentCost - bestAlt.totalCost;
+      if (gain < minGain) continue;
+
+      this._log('transfer_order', {
+        order: order.id,
+        from: driver.id,
+        to: bestAlt.driver.id,
+        gain_s: gain.toFixed(1),
+      });
+
+      order.driver_id = bestAlt.driver.id;
+      order.assigned_at = simTime;
+      this._syncDriverOrdersFromOrderLinks();
+      await this._routingPlanner.replan(driver);
+      await this._routingPlanner.replan(bestAlt.driver);
+    }
+  }
+
+  async _estimateCurrentDriverCost(order, driver, simTime) {
+    const evaluation = await this._simulator.evaluate({
+      topDrivers: [{ driver, viableStop: { type: 'driver' } }],
+      order,
+      simTime,
+      options: { includeCurrentOrderInState: true },
+    });
+
+    return evaluation[0]?.totalCost ?? Infinity;
+  }
+
+  async _findAlternativeAssignment(order, excludedDriverId, simTime) {
+    const restaurant = this._world.restaurants[order.restaurant_id];
+    const customer = this._world.customers[order.customer_id];
+    if (!restaurant || !customer) return null;
+
+    const { topDrivers } = await this._finder.find(order, { restaurant, customer });
+    const alternatives = topDrivers.filter(c => c.driver.id !== excludedDriverId);
+    if (alternatives.length === 0) return null;
+
+    const evaluated = await this._simulator.evaluate({
+      topDrivers: alternatives,
+      order,
+      simTime,
+      options: { includeCurrentOrderInState: false },
+    });
+
+    return evaluated
+    .filter(item => item.validExisting)
+    .sort((a, b) => a.totalCost - b.totalCost)[0] ?? null;
+  }
+
   handleOrderCreated(orderId, simTime) {
     this._log('order_created', { orderId });
     const order = this._world.orders[orderId];
+    if (order && !Number.isFinite(order.created_at)) order.created_at = simTime;
     if (order) this._tryAssign(order, simTime);
   }
 
   handleDriverLoadReduced(driverId, simTime) {
-    const queued = Object.values(this._world.orders)
-    .filter(o => o.status === 'queued' && o.triggered)
-    .sort((a, b) => (a.created_at ?? 0) - (b.created_at ?? 0));
+    const queued = this._buildRetryQueue(simTime);
 
     for (const order of queued) {
       this._tryAssign(order, simTime);
@@ -99,6 +246,23 @@ export class AssignmentEngine {
 
     this._assignOrder(order, simTime)
     .finally(() => this._assigning.delete(order.id));
+  }
+
+  _scoreCandidate(candidate, customer) {
+    const fairnessWeight = this._getParam('fairness_penalty_per_order_s', 120);
+    const softSlaWeight = this._getParam('soft_sla_penalty_factor', 2);
+    const activeOrders = candidate.driver?.orders?.length ?? 0;
+    const fairnessPenalty = activeOrders * fairnessWeight;
+
+    const maxSla = this._utils.getDeliverySla(customer);
+    const delay = Math.max(0, (candidate.etaToNewCustomer ?? Infinity) - maxSla);
+    const softSlaPenalty = delay * softSlaWeight;
+
+    return {
+      fairnessPenalty,
+      softSlaPenalty,
+      totalCost: (candidate.etaToNewCustomer ?? Infinity) + fairnessPenalty + softSlaPenalty,
+    };
   }
 
   async _assignOrder(order, simTime) {
@@ -124,18 +288,22 @@ export class AssignmentEngine {
     const evaluated =
     await this._simulator.evaluate({ topDrivers, order, simTime });
 
-    const validEvaluated = evaluated.filter(item => item.valid);
+    const scored = evaluated.map(candidate => {
+      const score = this._scoreCandidate(candidate, customer);
+      return { ...candidate, ...score };
+    });
 
-    const winnerData =
-    (validEvaluated.length > 0 ? validEvaluated : evaluated)
-    .sort((a, b) => a.etaToNewCustomer - b.etaToNewCustomer)[0];
+    const pool = scored.filter(item => item.validExisting);
+    const source = pool.length > 0 ? pool : scored;
+
+    const winnerData = source.sort((a, b) => a.totalCost - b.totalCost)[0];
 
     if (!winnerData) return;
 
     await this._applyAssignment({
       order,
       winnerData,
-      evaluated,
+      evaluated: scored,
       startedAtMs,
       simTime,
       restaurant,
@@ -154,19 +322,13 @@ export class AssignmentEngine {
   }) {
     const winner = winnerData.driver;
 
-    if (!Array.isArray(winner.orders)) {
-      winner.orders = [];
-    }
-
-    order.assignment_score = winnerData.etaToNewCustomer;
+    order.assignment_score = winnerData.totalCost;
     order.status = 'assigned';
     order.driver_id = winner.id;
     order.assigned_at = simTime;
-    order._kitchen_elapsed = 0;
+    order._kitchen_elapsed = order._kitchen_elapsed ?? 0;
 
-    if (!winner.orders.includes(order.id)) {
-      winner.orders.push(order.id);
-    }
+    this._syncDriverOrdersFromOrderLinks();
 
     try {
       const route = await fetchOSRMRoute(restaurant.pos, customer.pos);
@@ -179,7 +341,10 @@ export class AssignmentEngine {
     this._log('assigned', {
       order: order.id,
       driver: winner.name,
-      eta: order.assignment_score,
+      eta: winnerData.etaToNewCustomer,
+      totalCost: winnerData.totalCost,
+      fairnessPenalty: winnerData.fairnessPenalty,
+      softSlaPenalty: winnerData.softSlaPenalty,
       compute_ms: Date.now() - startedAtMs,
     });
 
@@ -197,25 +362,24 @@ export class AssignmentEngine {
       type,
     });
 
-    // ───────────── PICKUP ─────────────
     if (type === 'at_restaurant') {
-
-      const readyOrders = driver.orders
+      const readyOrders = (driver.orders ?? [])
       .map(id => orders[id])
       .filter(o =>
       o &&
+      o.driver_id === driver.id &&
       o.kitchen_status === 'ready' &&
       o.picked_up_at == null
       );
 
-      if (readyOrders.length === 0) return;
+      if (readyOrders.length === 0) {
+        driver.status = 'waiting_at_restaurant';
+        return;
+      }
 
       for (const order of readyOrders) {
-
         order.status = 'on_the_way';
         order.picked_up_at = simTime;
-
-        // 🔥 FIX status driver
         driver.status = 'moving_to_delivery';
 
         this._log('pickup', {
@@ -228,13 +392,12 @@ export class AssignmentEngine {
       return;
     }
 
-    // ───────────── DELIVERY ─────────────
     if (type === 'at_customer') {
-
-      const order = driver.orders
+      const order = (driver.orders ?? [])
       .map(id => orders[id])
       .find(o =>
       o?.status === 'on_the_way' &&
+      o.driver_id === driver.id &&
       this._utils.isAtCustomer(driver.pos, customers[o.customer_id].pos)
       );
 
@@ -242,16 +405,15 @@ export class AssignmentEngine {
 
       order.status = 'delivered';
       order.delivered_at = simTime;
+      order.driver_id = null;
 
-      // 🔥 remover del driver
-      driver.orders = driver.orders.filter(id => id !== order.id);
+      this._syncDriverOrdersFromOrderLinks();
 
       this._log('delivered', {
         driver: driver.name,
         order: order.id,
       });
 
-      // 🔥 retry pedidos pendientes
       this.handleDriverLoadReduced(driver.id, simTime);
 
       this._routingPlanner.replan(driver);

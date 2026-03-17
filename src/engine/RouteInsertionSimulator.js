@@ -19,11 +19,13 @@ export class RouteInsertionSimulator {
     return a.type === b.type && (a.orderId ?? null) === (b.orderId ?? null);
   }
 
-  _buildSimulationState(driver, candidateOrderId, simTime) {
+  _buildSimulationState(driver, candidateOrderId, simTime, includeCurrentOrderInState = false) {
     const state = {};
     const orders = this._world.orders;
 
     for (const orderId of driver.orders ?? []) {
+      if (!includeCurrentOrderInState && orderId === candidateOrderId) continue;
+
       const o = orders[orderId];
       if (!o) continue;
 
@@ -34,12 +36,14 @@ export class RouteInsertionSimulator {
       };
     }
 
-    state[candidateOrderId] = {
-      orderId: candidateOrderId,
-      status: 'assigned',
-      pickedUpAt: null,
-      assignedAt: simTime,
-    };
+    if (!includeCurrentOrderInState || !state[candidateOrderId]) {
+      state[candidateOrderId] = {
+        orderId: candidateOrderId,
+        status: 'assigned',
+        pickedUpAt: null,
+        assignedAt: simTime,
+      };
+    }
 
     return state;
   }
@@ -104,22 +108,26 @@ export class RouteInsertionSimulator {
       const eta = haversineMeters(currentPos, customer.pos) / speedMs;
 
       const urgent = eta >= remaining;
-
-      if (urgent) {
-        this._log('urgent_detected', {
-          driver: driver.name,
-          order: stop.orderId,
-          eta: eta.toFixed(1),
-                  remaining: remaining.toFixed(1),
-        });
-      }
-
       return urgent;
     });
   }
 
-  async _simulateDriverWithOrder({ driver, order, viableStop, simTime }) {
-    const simState = this._buildSimulationState(driver, order.id, simTime);
+  _estimateRestaurantWait(orderId, arrivalTime, simTime) {
+    const order = this._world.orders[orderId];
+    if (!order) return 0;
+    if (order.kitchen_status === 'ready') return 0;
+
+    const restaurant = this._world.restaurants[order.restaurant_id];
+    const prepTime = restaurant?.prep_time_s ?? 600;
+    const cooked = order._kitchen_elapsed ?? 0;
+    const remainingAtNow = Math.max(0, prepTime - cooked);
+
+    const elapsedUntilArrival = Math.max(0, arrivalTime - simTime);
+    return Math.max(0, remainingAtNow - elapsedUntilArrival);
+  }
+
+  async _simulateDriverWithOrder({ driver, order, viableStop, simTime, includeCurrentOrderInState = false }) {
+    const simState = this._buildSimulationState(driver, order.id, simTime, includeCurrentOrderInState);
 
     let currentPos = { ...driver.pos };
     let simNow = simTime;
@@ -135,26 +143,13 @@ export class RouteInsertionSimulator {
     : routeStops.filter((_, idx) => idx <= (viableStop?.routeIndex ?? -1));
 
     let prefixCursor = 0;
-
     const maxIterations = Object.keys(simState).length * 6 + 10;
 
-    this._log('start', {
-      driver: driver.name,
-      order: order.id,
-      prefixStops: prefixToViable.length,
-      viableStop,
-    });
-
     for (let i = 0; i < maxIterations; i++) {
-
       let activeStops = this._buildActiveStopsFromState(simState);
-
       if (activeStops.length === 0) break;
 
-      // evitar loops por distancia cero
-      activeStops = activeStops.filter(s =>
-      haversineMeters(currentPos, s.pos) > 1
-      );
+      activeStops = activeStops.filter(s => haversineMeters(currentPos, s.pos) > 1);
 
       if (!pickupInserted && reachedViable) {
         const restaurant = this._world.restaurants[order.restaurant_id];
@@ -166,50 +161,28 @@ export class RouteInsertionSimulator {
         }
       }
 
-      const urgent = this._findUrgentDeliveryStops(
-        driver,
-        currentPos,
-        activeStops,
-        simState,
-        simNow
-      );
+      const urgent = this._findUrgentDeliveryStops(driver, currentPos, activeStops, simState, simNow);
 
       let nextStop = null;
-      let decision = 'nearest';
 
       if (!reachedViable && prefixCursor < prefixToViable.length) {
         const expected = prefixToViable[prefixCursor];
         nextStop = activeStops.find(s => this._isSameStop(s, expected)) ?? null;
-        decision = 'prefix';
       }
 
       if (!pickupInserted && reachedViable && !nextStop) {
         nextStop = activeStops.find(s => s.type === 'pickup' && s.orderId === order.id) ?? null;
-        decision = 'force_pickup';
       }
 
       if (!nextStop) {
         nextStop = urgent.length > 0
         ? this._closestStop(currentPos, urgent)
         : this._closestStop(currentPos, activeStops);
-
-        decision = urgent.length > 0 ? 'urgent' : 'nearest';
       }
 
       if (!nextStop) break;
 
-      const travelTime =
-      await this._estimateTravelTime(currentPos, nextStop.pos, driver);
-
-      this._log('step', {
-        driver: driver.name,
-        step: i,
-        decision,
-        nextStop,
-        travelTime: travelTime.toFixed(1),
-                simNow: simNow.toFixed(1),
-      });
-
+      const travelTime = await this._estimateTravelTime(currentPos, nextStop.pos, driver);
       simNow += travelTime;
       currentPos = { ...nextStop.pos };
 
@@ -217,28 +190,17 @@ export class RouteInsertionSimulator {
       if (!state) continue;
 
       if (nextStop.type === 'pickup') {
+        const waitAtRestaurant = this._estimateRestaurantWait(nextStop.orderId, simNow, simTime);
+        simNow += waitAtRestaurant;
+
         state.status = 'on_the_way';
         state.pickedUpAt = simNow;
-
-        this._log('pickup', {
-          driver: driver.name,
-          order: nextStop.orderId,
-          time: simNow.toFixed(1),
-        });
 
         if (nextStop.orderId === order.id) {
           pickupInserted = true;
         }
-
       } else {
-
         state.status = 'delivered';
-
-        this._log('delivery', {
-          driver: driver.name,
-          order: nextStop.orderId,
-          time: simNow.toFixed(1),
-        });
 
         if (nextStop.orderId === order.id) {
           etaToNewCustomer = simNow - simTime;
@@ -248,24 +210,22 @@ export class RouteInsertionSimulator {
       if (!reachedViable && prefixCursor < prefixToViable.length &&
         this._isSameStop(nextStop, prefixToViable[prefixCursor])) {
         prefixCursor++;
-        }
+      }
 
-        if (!reachedViable && this._isSameStop(nextStop, viableStop)) {
-          reachedViable = true;
-        }
+      if (!reachedViable && this._isSameStop(nextStop, viableStop)) {
+        reachedViable = true;
+      }
     }
 
-    // SLA validation
     const newCustomer = this._world.customers[order.customer_id];
     const maxSla = this._utils.getDeliverySla(newCustomer);
-
-    const validNew =
-    Number.isFinite(etaToNewCustomer) &&
-    etaToNewCustomer <= maxSla;
+    const newOrderDelay = Math.max(0, etaToNewCustomer - maxSla);
 
     const slaBreaches = [];
 
     for (const orderId of driver.orders ?? []) {
+      if (orderId === order.id && !includeCurrentOrderInState) continue;
+
       const o = this._world.orders[orderId];
       const state = simState[orderId];
       if (!o || !state || o.status !== 'on_the_way') continue;
@@ -278,41 +238,23 @@ export class RouteInsertionSimulator {
 
       if (!Number.isFinite(elapsed) || elapsed > max) {
         slaBreaches.push(orderId);
-
-        this._log('sla_breach', {
-          driver: driver.name,
-          order: orderId,
-          elapsed,
-          max,
-        });
       }
     }
 
-    const valid =
-    Number.isFinite(etaToNewCustomer) &&
-    validNew &&
-    slaBreaches.length === 0;
-
-    this._log('result', {
-      driver: driver.name,
-      eta: etaToNewCustomer,
-      valid,
-      breaches: slaBreaches.length,
-    });
+    const validExisting = slaBreaches.length === 0;
+    const valid = Number.isFinite(etaToNewCustomer) && validExisting && newOrderDelay === 0;
 
     return {
       valid,
+      validExisting,
       etaToNewCustomer,
+      newOrderDelay,
       slaBreaches,
+      totalCost: etaToNewCustomer + newOrderDelay,
     };
   }
 
-  async evaluate({ topDrivers, order, simTime }) {
-    this._log('evaluate_start', {
-      order: order.id,
-      candidates: topDrivers.length,
-    });
-
+  async evaluate({ topDrivers, order, simTime, options = {} }) {
     return Promise.all(
       topDrivers.map(async (candidate) => ({
         ...candidate,
@@ -321,6 +263,7 @@ export class RouteInsertionSimulator {
           order,
           viableStop: candidate.viableStop,
           simTime,
+          includeCurrentOrderInState: options.includeCurrentOrderInState === true,
         })),
       }))
     );
