@@ -212,6 +212,14 @@ export function useSimulation() {
   const setMultiplier = useCallback((x) => {
     clockRef.current.setMultiplier(x);
     setMultiplierS(clockRef.current.multiplier);
+
+    setWorld(prev => ({
+      ...prev,
+      params: {
+        ...prev.params,
+        sim_multiplier: x
+      }
+    }));
   }, []);
 
   // ── Gestión de entidades ──────────────────────────────────────────────────

@@ -25,7 +25,7 @@ export function createDriver(pos, overrides = {}) {
     home_pos:      { ...pos },
     pos:           { ...pos },
     speed_kmh:     overrides.speed_kmh     ?? 35,
-    max_orders:    overrides.max_orders    ?? 1,
+    max_orders:    overrides.max_orders    ?? 3,
     rating:        overrides.rating        ?? 5.0,
     eta_sum:       0,
     status:        'idle',
@@ -56,7 +56,7 @@ export function createRestaurant(pos, overrides = {}) {
     id:            uid('rst'),
     name:          overrides.name       || `Comercio ${_nextId - 1}`,
     pos:           { ...pos },
-    prep_time_s:   overrides.prep_time_s ?? 600,   // 10 min default
+    prep_time_s:   overrides.prep_time_s ?? 180,   // 10 min default
     penalty:       overrides.penalty    ?? 0,
     metrics: {
       punctuality:   overrides.metrics?.punctuality  ?? 1.0,
@@ -75,7 +75,7 @@ export function createCustomer(pos, overrides = {}) {
     id:            uid('cus'),
     name:          overrides.name           || `Cliente ${_nextId - 1}`,
     pos:           { ...pos },
-    max_distance_km: overrides.max_distance_km ?? 10,
+    max_distance_km: overrides.max_distance_km ?? 5,
     ...overrides,
   };
 }
