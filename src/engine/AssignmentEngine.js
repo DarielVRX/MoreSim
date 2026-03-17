@@ -207,6 +207,18 @@ export class AssignmentEngine {
       totalCost: (candidate.etaToNewCustomer ?? Infinity) + fairnessPenalty + softSlaPenalty + hardSlaPenalty,
     };
   }
+  // ── NUEVO: helper para reservas ─────────────────────────────────────────────
+  _getDriverReservedSlots(driver) {
+    return driver._reservedSlots ?? 0;
+  }
+
+  _reserveDriverSlot(driver) {
+    driver._reservedSlots = (driver._reservedSlots ?? 0) + 1;
+  }
+
+  _releaseDriverSlot(driver) {
+    driver._reservedSlots = Math.max(0, (driver._reservedSlots ?? 1) - 1);
+  }
 
   async _assignOrder(order, simTime) {
     const startedAtMs = Date.now();
@@ -221,35 +233,83 @@ export class AssignmentEngine {
     }
 
     const { viableDrivers, topDrivers } = await this._finder.find(order, { restaurant, customer, simTime });
-    if (viableDrivers.length === 0 || topDrivers.length === 0) return false;
+
+    // filtrar por capacidad REAL (con reservas)
+    const capacityFiltered = topDrivers.filter(({ driver }) => {
+      const activeOrders = driver.orders?.length ?? 0;
+      const reserved = this._getDriverReservedSlots(driver);
+      const maxOrders = Number.isFinite(driver.max_orders) ? driver.max_orders : 1;
+
+      return (activeOrders + reserved) < maxOrders;
+    });
+
+    if (capacityFiltered.length === 0) return false;
 
     const simulationBudget = this._getParam('simulation_budget_per_tick', 75);
     const remainingBudget = Math.max(0, simulationBudget - this._tickSimulationCount);
     if (remainingBudget <= 0) return false;
 
-    const cappedTopDrivers = topDrivers.slice(0, remainingBudget);
+    const cappedTopDrivers = capacityFiltered.slice(0, remainingBudget);
     this._tickSimulationCount += cappedTopDrivers.length;
 
-    const evaluated = await this._simulator.evaluate({ topDrivers: cappedTopDrivers, order, simTime });
-    const scored = evaluated.map((candidate) => ({ ...candidate, ...this._scoreCandidate(candidate, customer) }));
+    // reservar slots
+    for (const candidate of cappedTopDrivers) {
+      this._reserveDriverSlot(candidate.driver);
+    }
+
+    const evaluated = await this._simulator.evaluate({
+      topDrivers: cappedTopDrivers,
+      order,
+      simTime
+    });
+
+    const scored = evaluated.map((candidate) => ({
+      ...candidate,
+      ...this._scoreCandidate(candidate, customer)
+    }));
 
     const pool = scored.filter((item) => item.validExisting);
     const source = pool.length > 0 ? pool : scored;
     const winnerData = source.sort((a, b) => a.totalCost - b.totalCost)[0];
-    if (!winnerData) return false;
 
-    await this._applyAssignment({ order, winnerData, startedAtMs, simTime, restaurant, customer });
+    if (!winnerData) {
+      // liberar todos
+      for (const candidate of cappedTopDrivers) {
+        this._releaseDriverSlot(candidate.driver);
+      }
+      return false;
+    }
+
+    // liberar todos EXCEPTO ganador
+    for (const candidate of cappedTopDrivers) {
+      if (candidate.driver.id !== winnerData.driver.id) {
+        this._releaseDriverSlot(candidate.driver);
+      }
+    }
+
+    await this._applyAssignment({
+      order,
+      winnerData,
+      startedAtMs,
+      simTime,
+      restaurant,
+      customer
+    });
+
     return true;
-  }
+    }
 
-  async _applyAssignment({ order, winnerData, startedAtMs, simTime, restaurant, customer }) {
-    const winner = winnerData.driver;
+    async _applyAssignment({ order, winnerData, startedAtMs, simTime, restaurant, customer }) {
+      const winner = winnerData.driver;
 
-    order.assignment_score = winnerData.totalCost;
-    order.status = 'assigned';
-    order.driver_id = winner.id;
-    order.assigned_at = simTime;
-    order._kitchen_elapsed = order._kitchen_elapsed ?? 0;
+      // liberar reserva del ganador (se convierte en asignación real)
+      this._releaseDriverSlot(winner);
+
+      order.assignment_score = winnerData.totalCost;
+      order.status = 'assigned';
+      order.driver_id = winner.id;
+      order.assigned_at = simTime;
+      order._kitchen_elapsed = order._kitchen_elapsed ?? 0;
 
     this._syncDriverOrdersFromOrderLinks();
 
@@ -281,7 +341,15 @@ export class AssignmentEngine {
     const { orders, customers } = this._world;
 
     if (type === 'at_restaurant') {
-      const readyOrders = (driver.orders ?? []).map((id) => orders[id]).filter((o) => o && o.driver_id === driver.id && o.kitchen_status === 'ready' && o.picked_up_at == null);
+      const readyOrders = (driver.orders ?? [])
+      .map(id => orders[id])
+      .filter(o =>
+      o &&
+      o.driver_id === driver.id &&
+      o.kitchen_status === 'ready' &&
+      o.picked_up_at == null &&
+      o.restaurant_id === driver.current_restaurant_id
+      );
       if (readyOrders.length === 0) {
         driver.status = 'waiting_at_restaurant';
         return;

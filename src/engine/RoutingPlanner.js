@@ -182,12 +182,33 @@ export class RoutingPlanner {
     // ─── MOVEMENT ───
     let routeInfo = null;
 
+    const prevPos = { ...driver.pos };
+    const prevIndex = driver.path_index ?? 0;
+
     try {
       routeInfo = await this._movement.setOrderRoute(
         driver,
         driver.pos,
         nextStop.pos
       );
+      // NO reiniciar progreso si ya estaba moviéndose
+      if (driver.path && driver.path.length > 0) {
+        driver.path_index = 0; // base
+
+        // opcional: buscar punto más cercano en nueva ruta
+        let bestIdx = 0;
+        let bestDist = Infinity;
+
+        for (let i = 0; i < driver.path.length; i++) {
+          const dist = haversineMeters(prevPos, driver.path[i]);
+          if (dist < bestDist) {
+            bestDist = dist;
+            bestIdx = i;
+          }
+        }
+
+        driver.path_index = bestIdx;
+      }
     } catch (e) {
       this._log('movement_error', {
         traceId,

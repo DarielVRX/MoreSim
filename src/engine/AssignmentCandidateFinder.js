@@ -122,7 +122,9 @@ export class AssignmentCandidateFinder {
         if (!this._isDriverConnected(driver) || !this._hasValidPos(driver?.pos)) return null;
         const activeOrders = driver.orders?.length ?? 0;
         const maxOrders = Number.isFinite(driver.max_orders) ? driver.max_orders : 1;
-        if (activeOrders >= maxOrders) return null;
+        const reserved = driver._reservedSlots ?? 0;
+
+        if ((activeOrders + reserved) >= maxOrders) return null;
 
         const viableStop = this._getClosestViableStop(driver, restaurant.pos, maxPickupRadiusM, traceId);
         if (!viableStop) return null;
