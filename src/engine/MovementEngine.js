@@ -25,7 +25,7 @@ export async function fetchOSRMRoute(from, to) {
 }
 
 export class MovementEngine {
-  constructor({ world, assignmentEngine, debug = true, tickRateMs = 1000 } = {}) {
+  constructor({ world, assignmentEngine, getSimTime = () => 0, debug = true, tickRateMs = 1000 } = {}) {
     this._pendingPaths = new Map();
     this._debug = debug;
 
@@ -33,6 +33,7 @@ export class MovementEngine {
     this._world = world;
     this._assignment = assignmentEngine;
     this._tickRateMs = tickRateMs;
+    this._getSimTime = getSimTime;
     this._interval = null;
   }
 
@@ -44,6 +45,10 @@ export class MovementEngine {
     });
   }
 
+
+  setSimTimeProvider(getSimTime) {
+    if (typeof getSimTime === 'function') this._getSimTime = getSimTime;
+  }
   // ─────────────────────────────────────────────
   // 🔥 AUTO START
   // ─────────────────────────────────────────────
@@ -102,12 +107,10 @@ export class MovementEngine {
   // 🔥 INTERNAL LOOP (CLAVE)
   // ─────────────────────────────────────────────
   _tickInternal(dtSim) {
-    this._log('tick_this._world return', { drivers: drivers.length });
     if (!this._world) return;
 
-    this._log('tick_called', { drivers: drivers.length });
-
     const drivers = Object.values(this._world.drivers);
+    this._log('tick_called', { drivers: drivers.length });
     const restaurants = Object.values(this._world.restaurants);
 
     this.tick(
@@ -123,7 +126,7 @@ export class MovementEngine {
         this._assignment?.handleDriverArrived?.(
           driver,
           type,
-          Date.now() / 1000
+          this._getSimTime()
         );
       }
     );

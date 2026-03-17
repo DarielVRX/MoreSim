@@ -13,7 +13,7 @@ export class RebalancingEngine {
     if (world) this._world = world;
   }
 
-  _estimateRestaurantWaitForOrder(orderId) {
+  _estimateRestaurantWaitForOrder(orderId, elapsedUntilArrival = 0) {
     const order = this._world.orders[orderId];
     if (!order || order.kitchen_status === 'ready') return 0;
 
@@ -21,7 +21,8 @@ export class RebalancingEngine {
     const prepTime = restaurant?.prep_time_s ?? 600;
     const cooked = order._kitchen_elapsed ?? 0;
 
-    return Math.max(0, prepTime - cooked);
+    const remainingAtNow = Math.max(0, prepTime - cooked);
+    return Math.max(0, remainingAtNow - Math.max(0, elapsedUntilArrival));
   }
 
   async _estimateRouteEta(driver) {
@@ -42,7 +43,7 @@ export class RebalancingEngine {
       eta += segments[i];
 
       if (stop.type === 'pickup') {
-        eta += this._estimateRestaurantWaitForOrder(stop.orderId);
+        eta += this._estimateRestaurantWaitForOrder(stop.orderId, eta);
       }
     }
 
