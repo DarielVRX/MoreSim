@@ -1,41 +1,29 @@
-import { fetchOSRMRoute } from './MovementEngine.js';
 import { haversineMeters } from './GraphCache.js';
 
 export class AssignmentCandidateFinder {
-  constructor({ world, variables, routingPlanner, assignmentUtils, debug = true }) {
+  constructor({ world, variables, routingPlanner, assignmentUtils, etaEstimator, debug = true }) {
     this._world = world;
     this._variables = variables;
     this._routingPlanner = routingPlanner;
     this._utils = assignmentUtils;
+    this._etaEstimator = etaEstimator;
     this._debug = debug;
   }
 
-  update({ world, variables, routingPlanner, assignmentUtils, debug }) {
+  update({ world, variables, routingPlanner, assignmentUtils, etaEstimator, debug }) {
     if (world) this._world = world;
     if (variables) this._variables = variables;
     if (routingPlanner) this._routingPlanner = routingPlanner;
     if (assignmentUtils) this._utils = assignmentUtils;
+    if (etaEstimator) this._etaEstimator = etaEstimator;
     if (typeof debug === 'boolean') this._debug = debug;
   }
 
-  // ─────────────────────────────────────────────
-  // LOGGER CENTRAL
-  // ─────────────────────────────────────────────
   _log(tag, data = {}, level = 'log') {
     if (!this._debug) return;
-
-    const payload = {
-      ts: Date.now(),
-      tag,
-      ...data,
-    };
-
-    console[level](`[Finder:${tag}]`, payload);
+    console[level](`[Finder:${tag}]`, { ts: Date.now(), tag, ...data });
   }
 
-  // ─────────────────────────────────────────────
-  // VALIDACIONES
-  // ─────────────────────────────────────────────
   _isDriverConnected(driver) {
     return !(driver?.disconnected === true || driver?.connected === false);
   }
@@ -46,70 +34,26 @@ export class AssignmentCandidateFinder {
 
   _getMaxPickupRadiusMeters() {
     const radiusKm =
-    this._world?.params?.max_pickup_radius_km ??
-    this._variables?.max_pickup_radius_km ??
-    this._variables?.MAX_PICKUP_RADIUS_KM ??
-    5;
+      this._world?.params?.max_pickup_radius_km ??
+      this._variables?.max_pickup_radius_km ??
+      this._variables?.MAX_PICKUP_RADIUS_KM ??
+      5;
 
     return radiusKm * 1000;
   }
 
-  // ─────────────────────────────────────────────
-  // ETA
-  // ─────────────────────────────────────────────
-  async _estimateTravelTime(fromPos, toPos, driver = null, useOSRM = false, traceId = null) {
-    if (useOSRM) {
-      try {
-        const { duration_s } = await fetchOSRMRoute(fromPos, toPos);
-
-        if (Number.isFinite(duration_s)) {
-          this._log('osrm', {
-            traceId,
-            from: fromPos,
-            to: toPos,
-            duration_s,
-          });
-          return duration_s;
-        }
-
-      } catch (e) {
-        this._log('fallback', {
-          traceId,
-          reason: 'osrm_failed',
-          error: e.message,
-        }, 'warn');
-      }
-    }
-
-    const speedMs = this._utils.getSpeedMs(driver);
-    const dist = haversineMeters(fromPos, toPos);
-    const time = dist / speedMs;
-
-    this._log('haversine', {
-      traceId,
-      from: fromPos,
-      to: toPos,
-      distance_m: dist.toFixed(1),
-              time_s: time.toFixed(1),
-    });
-
-    return time;
+  _estimateTravelTime(fromPos, toPos, driver = null, simTime = 0, traceId = null) {
+    const duration_s = this._etaEstimator.estimate(fromPos, toPos, driver, simTime);
+    this._log('eta', { traceId, duration_s, fromPos, toPos });
+    return duration_s;
   }
 
-  // ─────────────────────────────────────────────
-  // VIABLE STOP
-  // ─────────────────────────────────────────────
   _getClosestViableStop(driver, restaurantPos, maxPickupRadiusM, traceId) {
     const candidates = [];
     const driverDist = haversineMeters(driver.pos, restaurantPos);
 
     if (driverDist < maxPickupRadiusM) {
-      candidates.push({
-        type: 'driver',
-        orderId: null,
-        pos: { ...driver.pos },
-        distToRestaurant: driverDist,
-      });
+      candidates.push({ type: 'driver', orderId: null, pos: { ...driver.pos }, distToRestaurant: driverDist });
     }
 
     const stops = this._routingPlanner.buildStops(driver, this._world);
@@ -117,9 +61,7 @@ export class AssignmentCandidateFinder {
     for (let i = 0; i < stops.length; i++) {
       const stop = stops[i];
       const dist = haversineMeters(stop.pos, restaurantPos);
-
       if (dist >= maxPickupRadiusM) continue;
-
       candidates.push({
         type: stop.type,
         orderId: stop.orderId ?? null,
@@ -130,201 +72,84 @@ export class AssignmentCandidateFinder {
     }
 
     if (candidates.length === 0) {
-      this._log('discard', {
-        traceId,
-        driver: driver.name,
-        reason: 'no_viable_stop',
-        radius_m: maxPickupRadiusM,
-      });
+      this._log('discard', { traceId, driver: driver.name, reason: 'no_viable_stop' });
       return null;
     }
 
     candidates.sort((a, b) => a.distToRestaurant - b.distToRestaurant);
-
-    const best = candidates[0];
-
-    this._log('viable_stop', {
-      traceId,
-      driver: driver.name,
-      type: best.type,
-      orderId: best.orderId,
-      dist_m: best.distToRestaurant.toFixed(1),
-              routeIndex: best.routeIndex ?? null,
-              totalCandidates: candidates.length,
-    });
-
-    return best;
+    return candidates[0];
   }
 
-  async _estimateEtaToViableStop(driver, viableStop, traceId) {
+  _approximateCandidateScore(driver, viableStop, restaurant, customer, simTime) {
+    const activeOrders = driver.orders?.length ?? 0;
+    const loadPenalty = activeOrders * 180;
+    const etaToRestaurant = this._estimateTravelTime(viableStop.pos, restaurant.pos, driver, simTime);
+    const etaRestaurantToCustomer = this._estimateTravelTime(restaurant.pos, customer.pos, driver, simTime);
+    const totalEta = etaToRestaurant + etaRestaurantToCustomer;
+    return totalEta + loadPenalty;
+  }
+
+  async _estimateEtaToViableStop(driver, viableStop, traceId, simTime) {
     if (!viableStop || viableStop.type === 'driver') return 0;
 
     const stops = this._routingPlanner.buildStops(driver, this._world);
+    const segmentPromises = stops.map((stop, i) => {
+      const fromPos = i === 0 ? driver.pos : stops[i - 1].pos;
+      return this._estimateTravelTime(fromPos, stop.pos, driver, simTime, traceId);
+    });
+    const segmentTimes = await Promise.all(segmentPromises);
 
     let eta = 0;
-    let currentPos = driver.pos;
-
     for (let i = 0; i < stops.length; i++) {
+      eta += segmentTimes[i];
       const stop = stops[i];
-
-      const segmentTime =
-      await this._estimateTravelTime(currentPos, stop.pos, driver, false, traceId);
-
-      eta += segmentTime;
-
       const match =
-      (Number.isFinite(viableStop.routeIndex) && viableStop.routeIndex === i) ||
-      (stop.type === viableStop.type && (stop.orderId ?? null) === (viableStop.orderId ?? null));
-
-      if (match) {
-        this._log('eta_to_viable', {
-          traceId,
-          driver: driver.name,
-          eta_s: eta.toFixed(1),
-                  reachedStop: stop,
-        });
-
-        return eta;
-      }
-
-      currentPos = stop.pos;
+        (Number.isFinite(viableStop.routeIndex) && viableStop.routeIndex === i) ||
+        (stop.type === viableStop.type && (stop.orderId ?? null) === (viableStop.orderId ?? null));
+      if (match) return eta;
     }
 
     return 0;
   }
 
-  // ─────────────────────────────────────────────
-  // MAIN
-  // ─────────────────────────────────────────────
-  async find(order, { restaurant, customer }) {
-
+  async find(order, { restaurant, customer, simTime = 0 }) {
     const traceId = `order_${order.id}_${Date.now()}`;
-
     const maxPickupRadiusM = this._getMaxPickupRadiusMeters();
-    const drivers = Object.values(this._world.drivers);
+    const hardTopK = Math.max(1, this._world?.params?.assignment_hard_top_k ?? 5);
 
-    this._log('start', {
-      traceId,
-      order: order.id,
-      drivers: drivers.length,
-      radius_m: maxPickupRadiusM,
-    });
+    const viableDrivers = Object.values(this._world.drivers)
+      .map((driver) => {
+        if (!this._isDriverConnected(driver) || !this._hasValidPos(driver?.pos)) return null;
+        const activeOrders = driver.orders?.length ?? 0;
+        const maxOrders = Number.isFinite(driver.max_orders) ? driver.max_orders : 1;
+        if (activeOrders >= maxOrders) return null;
 
-    this._log('drivers_deep_inspect', {
-      traceId,
-      driversRaw: this._world.drivers,
-      keys: Object.keys(this._world.drivers || {}),
-              type: typeof this._world.drivers,
-    });
+        const viableStop = this._getClosestViableStop(driver, restaurant.pos, maxPickupRadiusM, traceId);
+        if (!viableStop) return null;
 
-    // ─── Estadísticas de descarte ───
-    const discardStats = {
-      not_connected: 0,
-      invalid_position: 0,
-      max_capacity: 0,
-      no_viable_stop: 0,
-    };
+        const approxScore = this._approximateCandidateScore(driver, viableStop, restaurant, customer, simTime);
+        return { driver, viableStop, approxScore };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.approxScore - b.approxScore);
 
-    const viableDrivers = drivers
-    .map((driver) => {
-
-      if (!this._isDriverConnected(driver)) {
-        discardStats.not_connected++;
-        this._log('discard', { traceId, driver: driver.name, reason: 'not_connected' });
-        return null;
-      }
-
-      if (!this._hasValidPos(driver?.pos)) {
-        discardStats.invalid_position++;
-        this._log('discard', { traceId, driver: driver.name, reason: 'invalid_position' });
-        return null;
-      }
-
-      const activeOrders = driver.orders?.length ?? 0;
-      const maxOrders = Number.isFinite(driver.max_orders) ? driver.max_orders : 1;
-
-      if (activeOrders >= maxOrders) {
-        discardStats.max_capacity++;
-        this._log('discard', {
-          traceId,
-          driver: driver.name,
-          reason: 'max_capacity',
-          activeOrders,
-          maxOrders,
-        });
-        return null;
-      }
-
-      const viableStop =
-      this._getClosestViableStop(driver, restaurant.pos, maxPickupRadiusM, traceId);
-
-      if (!viableStop) {
-        discardStats.no_viable_stop++;
-        return null;
-      }
-
-      return { driver, viableStop };
-    })
-    .filter(Boolean);
-
-    // ─── RESUMEN CLAVE ───
-    this._log('discard_summary', {
-      traceId,
-      totalDrivers: drivers.length,
-      viable: viableDrivers.length,
-      discarded: drivers.length - viableDrivers.length,
-      breakdown: discardStats,
-    });
-
-    if (viableDrivers.length === 0) {
-      return {
-        viableDrivers: [],
-        candidates: [],
-        topDrivers: [],
-        rejectedSummary: discardStats,
-      };
-    }
-
-    const etaRestaurantToCustomer =
-    await this._estimateTravelTime(
-      restaurant.pos,
-      customer.pos,
-      null,
-      true,
-      traceId
-    );
+    const reducedCandidates = viableDrivers.slice(0, hardTopK);
 
     const candidates = await Promise.all(
-      viableDrivers.map(async ({ driver, viableStop }) => {
+      reducedCandidates.map(async ({ driver, viableStop, approxScore }) => {
+        const [etaToViableStop, etaViableToRestaurant, etaRestaurantToCustomer] = await Promise.all([
+          this._estimateEtaToViableStop(driver, viableStop, traceId, simTime),
+          this._estimateTravelTime(viableStop.pos, restaurant.pos, driver, simTime, traceId),
+          this._estimateTravelTime(restaurant.pos, customer.pos, driver, simTime, traceId),
+        ]);
 
-        const etaToViableStop =
-        await this._estimateEtaToViableStop(driver, viableStop, traceId);
-
-        const etaViableToRestaurant =
-        await this._estimateTravelTime(
-          viableStop.pos,
-          restaurant.pos,
-          driver,
-          true,
-          traceId
-        );
-
-        const etaToRestaurant =
-        etaToViableStop + etaViableToRestaurant;
-
-        const etaCandidate =
-        etaToRestaurant + etaRestaurantToCustomer;
-
-        this._log('candidate_eta', {
-          traceId,
-          driver: driver.name,
-          etaToRestaurant: etaToRestaurant.toFixed(1),
-                  total: etaCandidate.toFixed(1),
-        });
+        const etaToRestaurant = etaToViableStop + etaViableToRestaurant;
+        const etaCandidate = etaToRestaurant + etaRestaurantToCustomer;
 
         return {
           driver,
           viableStop,
+          approxScore,
           etaToRestaurant,
           etaCandidate,
           etaTotalPrelim: etaToRestaurant,
@@ -332,31 +157,12 @@ export class AssignmentCandidateFinder {
       })
     );
 
-    // ─── DISTRIBUCIÓN ETA ───
-    const etaValues = candidates.map(c => c.etaCandidate);
-
-    this._log('eta_distribution', {
-      traceId,
-      min: Math.min(...etaValues).toFixed(1),
-              max: Math.max(...etaValues).toFixed(1),
-              avg: (etaValues.reduce((a, b) => a + b, 0) / etaValues.length).toFixed(1),
-    });
-
     candidates.sort((a, b) => a.etaTotalPrelim - b.etaTotalPrelim);
-
-    this._log('ranking_top5', {
-      traceId,
-      top: candidates.slice(0, 5).map(c => ({
-        driver: c.driver.name,
-        eta: c.etaCandidate.toFixed(1),
-      })),
-    });
 
     return {
       viableDrivers,
       candidates,
-      topDrivers: candidates.slice(0, 10),
-      etaRestaurantToCustomer,
+      topDrivers: candidates,
       traceId,
     };
   }

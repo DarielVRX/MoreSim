@@ -112,6 +112,9 @@ export function createOrder(restaurant_id, customer_id, overrides = {}) {
     route_distance_km: null,         // comercio→cliente, calculado al asignar
     pickup_wait_s:     0,
     score_breakdown:   null,         // qué driver ganó y por qué
+    retry_count:       0,
+    next_retry_at:     0,
+    last_transferred_at: null,
     ...overrides,
   };
 }
