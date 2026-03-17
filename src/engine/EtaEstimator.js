@@ -1,10 +1,9 @@
 import { haversineMeters } from './GraphCache.js';
 
 export class EtaEstimator {
-  constructor({ assignmentUtils, gridSizeMeters = 75, timeBucketSeconds = 60, cacheMaxEntries = 3000 }) {
+  constructor({ assignmentUtils, gridSizeMeters = 75, cacheMaxEntries = 3000 }) {
     this._utils = assignmentUtils;
     this._gridSizeMeters = gridSizeMeters;
-    this._timeBucketSeconds = timeBucketSeconds;
     this._cacheMaxEntries = cacheMaxEntries;
     this._cache = new Map();
   }
@@ -21,10 +20,9 @@ export class EtaEstimator {
     return `${this._quantize(pos.lat)}:${this._quantize(pos.lng)}`;
   }
 
-  _buildCacheKey(fromPos, toPos, driver, simTime = 0) {
+  _buildCacheKey(fromPos, toPos, driver) {
     const speed = this._utils.getSpeedMs(driver);
-    const timeBucket = Math.floor(Math.max(0, simTime) / this._timeBucketSeconds);
-    return `${this._key(fromPos)}->${this._key(toPos)}@${speed.toFixed(2)}#${timeBucket}`;
+    return `${this._key(fromPos)}->${this._key(toPos)}@${speed.toFixed(2)}`;
   }
 
   _setCache(key, value) {
@@ -35,8 +33,8 @@ export class EtaEstimator {
     this._cache.set(key, value);
   }
 
-  estimate(fromPos, toPos, driver, simTime = 0) {
-    const key = this._buildCacheKey(fromPos, toPos, driver, simTime);
+  estimate(fromPos, toPos, driver) {
+    const key = this._buildCacheKey(fromPos, toPos, driver);
     if (this._cache.has(key)) return this._cache.get(key);
 
     const speedMs = this._utils.getSpeedMs(driver);
@@ -45,4 +43,3 @@ export class EtaEstimator {
     return eta;
   }
 }
-

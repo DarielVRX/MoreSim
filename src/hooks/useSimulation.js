@@ -58,6 +58,10 @@ export function useSimulation() {
     assignRef.current._world = worldRef.current;
   }
 
+  useEffect(() => {
+    movementRef.current.setSimTimeProvider(() => clockRef.current.simTime);
+  }, []);
+
   const variablesRef = useRef(variables);
   useEffect(() => { variablesRef.current = variables; }, [variables]);
 

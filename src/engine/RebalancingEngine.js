@@ -13,7 +13,7 @@ export class RebalancingEngine {
     if (world) this._world = world;
   }
 
-  _estimateRestaurantWaitForOrder(orderId, arrivalTime, simTime) {
+  _estimateRestaurantWaitForOrder(orderId, elapsedUntilArrival = 0) {
     const order = this._world.orders[orderId];
     if (!order || order.kitchen_status === 'ready') return 0;
 
@@ -21,16 +21,17 @@ export class RebalancingEngine {
     const prepTime = restaurant?.prep_time_s ?? 600;
     const cooked = order._kitchen_elapsed ?? 0;
 
-    return Math.max(0, prepTime - cooked);
+    const remainingAtNow = Math.max(0, prepTime - cooked);
+    return Math.max(0, remainingAtNow - Math.max(0, elapsedUntilArrival));
   }
 
-  async _estimateRouteEta(driver, simTime) {
+  async _estimateRouteEta(driver) {
     const stops = this._routingPlanner.buildStops(driver, this._world);
     if (stops.length === 0) return 0;
 
     const segmentPromises = stops.map((stop, index) => {
       const fromPos = index === 0 ? driver.pos : stops[index - 1].pos;
-      return this._etaEstimator.estimate(fromPos, stop.pos, driver, simTime);
+      return this._etaEstimator.estimate(fromPos, stop.pos, driver);
     });
 
     const segments = await Promise.all(segmentPromises);
@@ -42,7 +43,7 @@ export class RebalancingEngine {
       eta += segments[i];
 
       if (stop.type === 'pickup') {
-        eta += this._estimateRestaurantWaitForOrder(stop.orderId, simTime, simTime);
+        eta += this._estimateRestaurantWaitForOrder(stop.orderId, eta);
       }
     }
 
@@ -102,7 +103,7 @@ export class RebalancingEngine {
   }
 
   async _findBestRecipientForBundle({ sourceDriver, bundleOrderIds, simTime }) {
-    const sourceBaseRouteEta = await this._estimateRouteEta(sourceDriver, simTime);
+    const sourceBaseRouteEta = await this._estimateRouteEta(sourceDriver);
 
     const sourceCost = await this._estimateBundleCostForDriver(
       bundleOrderIds,
@@ -125,7 +126,7 @@ export class RebalancingEngine {
 
         if (activeOrders + bundleOrderIds.length > maxOrders) return null;
 
-        const recipientBaseRouteEta = await this._estimateRouteEta(recipient, simTime);
+        const recipientBaseRouteEta = await this._estimateRouteEta(recipient);
 
         const recipientCost = await this._estimateBundleCostForDriver(
           bundleOrderIds,
@@ -149,7 +150,7 @@ export class RebalancingEngine {
 
     if (!best) return null;
 
-    const routeEta = await this._estimateRouteEta(best.driver, simTime);
+    const routeEta = await this._estimateRouteEta(best.driver);
 
     return { ...best, routeEta };
   }
@@ -166,10 +167,7 @@ export class RebalancingEngine {
 
   async run(simTime) {
     const minGain = this._getParam('transfer_min_gain_s', 10);
-    const multiplier = this._getParam('sim_multiplier', 1);
-
-    const maxRouteEta =
-    this._getParam('transfer_max_route_eta_s', 180) / Math.sqrt(multiplier);
+    const maxRouteEta = this._getParam('transfer_max_route_eta_s', 180);
 
     let transfers = 0;
     const maxIterations = this._getParam('transfer_max_iterations', 5);
@@ -183,7 +181,7 @@ export class RebalancingEngine {
       const routeCandidates = await Promise.all(
         drivers.map(async (driver) => ({
           driver,
-          routeEta: await this._estimateRouteEta(driver, simTime),
+          routeEta: await this._estimateRouteEta(driver),
                                        transferableTail: this._getTransferableTailOrders(driver, simTime),
         }))
       );
