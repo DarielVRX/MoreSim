@@ -100,22 +100,13 @@ export function useSimulation() {
       }
 
       // Tick del assignment engine
-      assignRef.current._world = w;
-      assignRef.current.tick(dtSim, st);
-
-      // Tick del movement engine
-      movementRef.current.tick(
-        Object.values(w.drivers),
-        dtSim,
-        Object.values(w.restaurants),
-        (driver, type) => assignRef.current.handleDriverArrived(driver, type, st)
-      );
+      if (assignRef.current) {
+        assignRef.current._world = w;
+        assignRef.current.tick(dtSim, st);
+      }
 
       // Snapshot para replay
       recorderRef.current.maybeSave(st, w);
-
-      // Forzar re-render del world (shallow clone de drivers para trigger)
-      setWorld(prev => ({ ...prev, drivers: { ...prev.drivers } }));
 
       // Calcular métricas cada segundo simulado
       if (Math.floor(st) !== Math.floor(st - dtSim)) {
@@ -123,6 +114,34 @@ export function useSimulation() {
       }
     });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Loop de movimiento continuo (independiente del assignment tick) ───────
+  useEffect(() => {
+    if (simState !== 'running') return;
+
+    let lastMs = performance.now();
+
+    const intervalId = setInterval(() => {
+      const nowMs = performance.now();
+      const realDt = (nowMs - lastMs) / 1000;
+      lastMs = nowMs;
+
+      const dtSim = Math.min(realDt, 0.2) * clockRef.current.multiplier;
+      const w = worldRef.current;
+
+      movementRef.current.tick(
+        Object.values(w.drivers),
+        dtSim,
+        Object.values(w.restaurants),
+        (driver, type) => assignRef.current?.handleDriverArrived(driver, type, clockRef.current.simTime)
+      );
+
+      // refrescar posiciones para la UI
+      setWorld(prev => ({ ...prev, drivers: { ...prev.drivers } }));
+    }, 100);
+
+    return () => clearInterval(intervalId);
+  }, [simState]);
 
   // ── Control de simulación ─────────────────────────────────────────────────
   const start = useCallback(() => {
