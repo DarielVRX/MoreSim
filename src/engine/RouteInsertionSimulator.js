@@ -1,3 +1,4 @@
+import { getRemainingPrepTime } from './OrderTiming.js';
 import { haversineMeters } from './GraphCache.js';
 
 export class RouteInsertionSimulator {
@@ -115,15 +116,8 @@ export class RouteInsertionSimulator {
   _estimateRestaurantWait(orderId, arrivalTime, simTime) {
     const order = this._world.orders[orderId];
     if (!order) return 0;
-    if (order.kitchen_status === 'ready') return 0;
 
-    const restaurant = this._world.restaurants[order.restaurant_id];
-    const prepTime = restaurant?.prep_time_s ?? 600;
-    const cooked = order._kitchen_elapsed ?? 0;
-    const remainingAtNow = Math.max(0, prepTime - cooked);
-
-    const elapsedUntilArrival = Math.max(0, arrivalTime - simTime);
-    return Math.max(0, remainingAtNow - elapsedUntilArrival);
+    return getRemainingPrepTime(order, this._world, arrivalTime);
   }
 
   async _simulateDriverWithOrder({ driver, order, viableStop, simTime, includeCurrentOrderInState = false }) {

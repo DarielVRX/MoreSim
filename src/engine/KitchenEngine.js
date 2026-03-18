@@ -1,6 +1,6 @@
+import { ensureOrderTiming, getPrepElapsedTime, getRemainingPrepTime } from './OrderTiming.js';
+
 export class KitchenEngine {
-
-
   constructor({ world, onEvent }) {
     this._world = world;
     this._onEvent = onEvent ?? (() => {});
@@ -16,18 +16,19 @@ export class KitchenEngine {
 
     for (const order of Object.values(orders)) {
       const isCooking =
-      order.kitchen_status === 'preparing' &&
-      order.picked_up_at == null;
+        order.kitchen_status === 'preparing' &&
+        order.picked_up_at == null;
 
       if (!isCooking) continue;
 
-      order._kitchen_elapsed = (order._kitchen_elapsed ?? 0) + dtSim;
       const restaurant = restaurants[order.restaurant_id];
-      const prepTime = restaurant?.prep_time_s ?? 600;
+      const timing = ensureOrderTiming(order, this._world, simTime);
+      order._kitchen_elapsed = getPrepElapsedTime(order, this._world, simTime);
 
-      if (order._kitchen_elapsed >= prepTime) {
+      if (getRemainingPrepTime(order, this._world, simTime) <= 0) {
         order.kitchen_status = 'ready';
-        order.kitchen_ready_at = simTime;
+        order.kitchen_ready_at = timing?.prepReadyAt ?? simTime;
+        order._kitchen_elapsed = timing?.prepTimeS ?? order._kitchen_elapsed;
 
         this._onEvent({
           time: simTime,
