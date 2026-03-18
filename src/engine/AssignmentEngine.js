@@ -155,6 +155,13 @@ export class AssignmentEngine {
     this._log('order_created', { orderId });
     const order = this._world.orders[orderId];
     if (order && !Number.isFinite(order.created_at)) order.created_at = simTime;
+    if (order && !Number.isFinite(order.triggered_at)) order.triggered_at = simTime;
+    if (order) {
+      order.prep_started_at = Number.isFinite(order.prep_started_at) ? order.prep_started_at : simTime;
+      order.prep_ready_at_estimate = Number.isFinite(order.prep_ready_at_estimate)
+        ? order.prep_ready_at_estimate
+        : simTime + (this._world.restaurants[order.restaurant_id]?.prep_time_s ?? 600);
+    }
     if (order) this._tryAssign(order, simTime);
   }
 
@@ -192,6 +199,8 @@ export class AssignmentEngine {
     const fairnessWeight = this._getParam('fairness_penalty_per_order_s', 120);
     const softSlaWeight = this._getParam('soft_sla_penalty_factor', 2);
     const hardPenalty = this._getParam('hard_sla_penalty_s', 3000);
+    const proximityWeight = this._getParam('pickup_proximity_penalty_factor', 0.35);
+    const bridgeWeight = this._getParam('pickup_bridge_penalty_factor', 1);
     const activeOrders = candidate.driver?.orders?.length ?? 0;
     const fairnessPenalty = activeOrders * fairnessWeight;
 
@@ -199,12 +208,22 @@ export class AssignmentEngine {
     const delay = Math.max(0, (candidate.etaToNewCustomer ?? Infinity) - maxSla);
     const softSlaPenalty = delay * softSlaWeight;
     const hardSlaPenalty = delay > 0 ? hardPenalty : 0;
+    const proximityPenalty = Math.max(0, candidate.directDriverToRestaurantMeters ?? 0) * proximityWeight / Math.max(1, this._utils.getSpeedMs(candidate.driver));
+    const bridgePenalty = Math.max(0, candidate.bridgePenaltyS ?? 0) * bridgeWeight;
 
     return {
       fairnessPenalty,
       softSlaPenalty,
       hardSlaPenalty,
-      totalCost: (candidate.etaToNewCustomer ?? Infinity) + fairnessPenalty + softSlaPenalty + hardSlaPenalty,
+      proximityPenalty,
+      bridgePenalty,
+      totalCost:
+        (candidate.etaToNewCustomer ?? Infinity) +
+        fairnessPenalty +
+        softSlaPenalty +
+        hardSlaPenalty +
+        proximityPenalty +
+        bridgePenalty,
     };
   }
   // ── NUEVO: helper para reservas ─────────────────────────────────────────────
@@ -268,8 +287,9 @@ export class AssignmentEngine {
       ...this._scoreCandidate(candidate, customer)
     }));
 
-    const pool = scored.filter((item) => item.validExisting);
-    const source = pool.length > 0 ? pool : scored;
+    const validPool = scored.filter((item) => item.valid);
+    const existingSlaPool = scored.filter((item) => item.validExisting);
+    const source = validPool.length > 0 ? validPool : (existingSlaPool.length > 0 ? existingSlaPool : scored);
     const winnerData = source.sort((a, b) => a.totalCost - b.totalCost)[0];
 
     if (!winnerData) {
@@ -328,6 +348,8 @@ export class AssignmentEngine {
       fairnessPenalty: winnerData.fairnessPenalty,
       softSlaPenalty: winnerData.softSlaPenalty,
       hardSlaPenalty: winnerData.hardSlaPenalty,
+      proximityPenalty: winnerData.proximityPenalty,
+      bridgePenalty: winnerData.bridgePenalty,
       compute_ms: Date.now() - startedAtMs,
     });
 

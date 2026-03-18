@@ -106,6 +106,9 @@ export function createOrder(restaurant_id, customer_id, overrides = {}) {
     trigger:           overrides.trigger      ?? 'manual',   // 'manual' | number (sim seconds)
     triggered:         false,        // ya fue lanzado al engine
     assigned_at:       null,
+    triggered_at:      null,
+    prep_started_at:   null,
+    prep_ready_at_estimate: null,
     kitchen_ready_at:  null,
     picked_up_at:      null,
     delivered_at:      null,

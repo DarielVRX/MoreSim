@@ -1,3 +1,4 @@
+import { getRemainingPrepTime } from './OrderTiming.js';
 export class RebalancingEngine {
   constructor({ world, routingPlanner, simulator, assignmentUtils, etaEstimator, getParam, onLog }) {
     this._world = world;
@@ -15,13 +16,9 @@ export class RebalancingEngine {
 
   _estimateRestaurantWaitForOrder(orderId, arrivalTime, simTime) {
     const order = this._world.orders[orderId];
-    if (!order || order.kitchen_status === 'ready') return 0;
+    if (!order) return 0;
 
-    const restaurant = this._world.restaurants[order.restaurant_id];
-    const prepTime = restaurant?.prep_time_s ?? 600;
-    const cooked = order._kitchen_elapsed ?? 0;
-
-    return Math.max(0, prepTime - cooked);
+    return getRemainingPrepTime(order, this._world, arrivalTime);
   }
 
   async _estimateRouteEta(driver, simTime) {
@@ -42,7 +39,7 @@ export class RebalancingEngine {
       eta += segments[i];
 
       if (stop.type === 'pickup') {
-        eta += this._estimateRestaurantWaitForOrder(stop.orderId, simTime, simTime);
+        eta += this._estimateRestaurantWaitForOrder(stop.orderId, simTime + eta, simTime);
       }
     }
 
@@ -90,7 +87,7 @@ export class RebalancingEngine {
         options: { includeCurrentOrderInState },
       });
 
-      if (!result?.validExisting || !Number.isFinite(result.totalCost)) return Infinity;
+      if (!result?.valid || !Number.isFinite(result.totalCost)) return Infinity;
 
       total += result.totalCost;
     }
@@ -166,10 +163,9 @@ export class RebalancingEngine {
 
   async run(simTime) {
     const minGain = this._getParam('transfer_min_gain_s', 10);
-    const multiplier = this._getParam('sim_multiplier', 1);
 
     const maxRouteEta =
-    this._getParam('transfer_max_route_eta_s', 180) / Math.sqrt(multiplier);
+    this._getParam('transfer_max_route_eta_s', 180);
 
     let transfers = 0;
     const maxIterations = this._getParam('transfer_max_iterations', 5);
