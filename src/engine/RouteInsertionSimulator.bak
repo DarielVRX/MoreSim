@@ -113,10 +113,11 @@ export class RouteInsertionSimulator {
     });
   }
 
-  _estimateRestaurantWait(orderId, arrivalTime, simTime) {
+  _estimateRestaurantWait(orderId, arrivalTime) {
     const order = this._world.orders[orderId];
     if (!order) return 0;
 
+    // Pasamos 'this._world' explícitamente como segundo argumento
     return getRemainingPrepTime(order, this._world, arrivalTime);
   }
 
@@ -159,22 +160,40 @@ export class RouteInsertionSimulator {
 
       let nextStop = null;
 
+      // 1. prefijo obligatorio
       if (!reachedViable && prefixCursor < prefixToViable.length) {
         const expected = prefixToViable[prefixCursor];
         nextStop = activeStops.find(s => this._isSameStop(s, expected)) ?? null;
       }
 
-      if (!pickupInserted && reachedViable) {
-        const pickupStop = activeStops.find(
+      // 2. pickup del nuevo pedido
+      if (!nextStop && !pickupInserted && reachedViable) {
+        nextStop = activeStops.find(
           s => s.type === 'pickup' && s.orderId === order.id
+        ) ?? null;
+      }
+
+      // 3. delivery del nuevo pedido (PRIORIDAD REAL)
+      if (pickupInserted) {
+        const deliveryStop = activeStops.find(
+          s => s.type === 'delivery' && s.orderId === order.id
         );
 
-        if (pickupStop) {
-          nextStop = pickupStop;
+        if (deliveryStop) {
+          nextStop = deliveryStop;
         }
       }
 
+      // 4. heurísticas normales
       if (!nextStop) {
+        const urgent = this._findUrgentDeliveryStops(
+          driver,
+          currentPos,
+          activeStops,
+          simState,
+          simNow
+        );
+
         nextStop = urgent.length > 0
         ? this._closestStop(currentPos, urgent)
         : this._closestStop(currentPos, activeStops);
@@ -219,9 +238,12 @@ export class RouteInsertionSimulator {
 
     const newCustomer = this._world.customers[order.customer_id];
     const maxSla = this._utils.getDeliverySla(newCustomer);
+
+    // 🔥 penalización del nuevo pedido (sin negativos)
     const newOrderDelay = Math.max(0, etaToNewCustomer - maxSla);
 
-    const slaBreaches = [];
+    // 🔥 calcular penalización existente (baseline dinámico)
+    let existingPenalty = 0;
 
     for (const orderId of driver.orders ?? []) {
       if (orderId === order.id && !includeCurrentOrderInState) continue;
@@ -236,22 +258,116 @@ export class RouteInsertionSimulator {
       const deliveredAt = state.status === 'delivered' ? simNow : Infinity;
       const elapsed = deliveredAt - state.pickedUpAt;
 
-      if (!Number.isFinite(elapsed) || elapsed > max) {
-        slaBreaches.push(orderId);
+      if (Number.isFinite(elapsed)) {
+        const delay = Math.max(0, elapsed - max);
+        if (delay > existingPenalty) existingPenalty = delay;
+      } else {
+        // 🔴 caso no entregado → penalización alta controlada
+        existingPenalty = Math.max(existingPenalty, max);
       }
     }
 
-    const validExisting = slaBreaches.length === 0;
-    const valid = Number.isFinite(etaToNewCustomer) && validExisting && newOrderDelay === 0;
+    // 🔥 señal informativa (ya no bloquea)
+    const validExisting = existingPenalty === 0;
+
+    // 🔥 validez mínima (solo estructura)
+    const valid = Number.isFinite(etaToNewCustomer);
+
+    // 🔥 costo final (ajustable)
+    const totalCost =
+    etaToNewCustomer +
+    newOrderDelay * 3 +        // peso del nuevo pedido
+    existingPenalty * 4;       // peso de daño existente (más importante)
 
     return {
       valid,
-      validExisting,
+      validExisting,        // ahora es señal, no filtro
       etaToNewCustomer,
       newOrderDelay,
-      slaBreaches,
-      totalCost: etaToNewCustomer + newOrderDelay,
+      existingPenalty,      // 🔥 NUEVO (clave)
+      totalCost,
     };
+  }
+
+  async estimateCurrentDriverCost(driver, simTime) {
+    const simState = this._buildSimulationState(
+      driver,
+      null,        // 🔥 no hay nueva orden
+      simTime,
+      true         // 🔥 incluir todas las actuales
+    );
+
+    let currentPos = { ...driver.pos };
+    let simNow = simTime;
+
+    const maxIterations = Object.keys(simState).length * 6 + 10;
+
+    for (let i = 0; i < maxIterations; i++) {
+
+      let activeStops = this._buildActiveStopsFromState(simState);
+      if (activeStops.length === 0) break;
+
+      // Seleccionamos la siguiente parada de la lista completa
+      let nextStop = urgent.length > 0
+      ? this._closestStop(currentPos, urgent)
+      : this._closestStop(currentPos, activeStops);
+
+      if (!nextStop) break;
+
+      // Solo calculamos viaje si realmente hay una distancia significativa
+      const dist = haversineMeters(currentPos, nextStop.pos);
+      if (dist > 5) { // Umbral de 5 metros para evitar micro-viajes
+        const travelTime = await this._estimateTravelTime(currentPos, nextStop.pos, driver);
+        simNow += travelTime;
+        currentPos = { ...nextStop.pos };
+      }
+
+      const state = simState[nextStop.orderId];
+      if (!state) continue;
+
+      // ... dentro del loop de estimateCurrentDriverCost
+      if (nextStop.type === 'pickup') {
+        // Ahora solo pasamos 2 argumentos, el método interno se encarga del resto
+        const wait = this._estimateRestaurantWait(nextStop.orderId, simNow);
+        simNow += wait;
+
+        state.status = 'on_the_way';
+        state.pickedUpAt = simNow;
+
+      } else {
+        state.status = 'delivered';
+      }
+    }
+
+    // 🔥 MISMA lógica de penalización que ya usas
+    let existingPenalty = 0;
+
+    for (const orderId of driver.orders ?? []) {
+      const o = this._world.orders[orderId];
+      const state = simState[orderId];
+
+      if (!o || !state || o.status !== 'on_the_way') continue;
+
+      const customer = this._world.customers[o.customer_id];
+      const max = this._utils.getDeliverySla(customer);
+
+      const deliveredAt =
+      state.status === 'delivered' ? simNow : Infinity;
+
+      const elapsed = deliveredAt - state.pickedUpAt;
+
+      if (Number.isFinite(elapsed)) {
+        const delay = Math.max(0, elapsed - max);
+        if (delay > existingPenalty) existingPenalty = delay;
+      } else {
+        existingPenalty = Math.max(existingPenalty, max);
+      }
+    }
+
+    return (
+      (simNow - simTime) +
+      existingPenalty * 4   // 🔥 MISMO peso que usas arriba
+    );
   }
 
   async evaluate({ topDrivers, order, simTime, options = {} }) {

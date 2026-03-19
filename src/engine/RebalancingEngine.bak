@@ -99,19 +99,10 @@ export class RebalancingEngine {
   }
 
   async _findBestRecipientForBundle({ sourceDriver, bundleOrderIds, simTime }) {
-    const sourceBaseRouteEta = await this._estimateRouteEta(sourceDriver, simTime);
+    const sourceBaseCost = await this._estimateBundleCostForDriver([], sourceDriver, simTime, true)
+    const sourceBaseCost = await this._simulator.estimateCurrentDriverCost(sourceDriver, simTime)
 
-    const sourceCost = await this._estimateBundleCostForDriver(
-      bundleOrderIds,
-      sourceDriver,
-      simTime,
-      true
-    );
-    console.log('bundle', bundleOrderIds, 'S_Base', sourceBaseRouteEta, 'S_Cost', sourceCost)
-
-    if (!Number.isFinite(sourceCost)) return null;
-
-    const sourceMarginal = sourceCost - sourceBaseRouteEta;
+    const sourceMarginal = sourceCost - sourceBaseCost
 
     const recipients = Object.values(this._world.drivers)
     .filter((driver) => driver.id !== sourceDriver.id);
@@ -123,19 +114,10 @@ export class RebalancingEngine {
 
         if (activeOrders + bundleOrderIds.length > maxOrders) return null;
 
-        const recipientBaseRouteEta = await this._estimateRouteEta(recipient, simTime);
+        const recipientBaseCost = await this._simulator.estimateCurrentDriverCost(recipient, simTime)
+        const recipientCost = await this._estimateBundleCostForDriver(bundleOrderIds, recipient, simTime, false)
 
-        const recipientCost = await this._estimateBundleCostForDriver(
-          bundleOrderIds,
-          recipient,
-          simTime,
-          false
-        );
-        console.log('R_Base', recipientBaseRouteEta, 'R_Cost',recipientCost)
-
-        if (!Number.isFinite(recipientCost)) return null;
-
-        const recipientMarginal = recipientCost - recipientBaseRouteEta;
+        const recipientMarginal = recipientCost - recipientBaseCost
         const gain = sourceMarginal - recipientMarginal;
         console.log('source', sourceMarginal, 'recipient', recipientMarginal)
 
