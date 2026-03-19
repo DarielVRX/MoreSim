@@ -26,10 +26,8 @@ export class RouteInsertionSimulator {
 
     for (const orderId of driver.orders ?? []) {
       if (!includeCurrentOrderInState && orderId === candidateOrderId) continue;
-
       const o = orders[orderId];
       if (!o) continue;
-
       state[orderId] = {
         orderId,
         status: o.status,
@@ -37,7 +35,7 @@ export class RouteInsertionSimulator {
       };
     }
 
-    if (!includeCurrentOrderInState || !state[candidateOrderId]) {
+    if (!state[candidateOrderId]) {
       state[candidateOrderId] = {
         orderId: candidateOrderId,
         status: 'assigned',
@@ -64,11 +62,9 @@ export class RouteInsertionSimulator {
         }
       }
 
-      if (orderState.status === 'on_the_way') {
-        const customer = customers[order.customer_id];
-        if (customer?.pos) {
-          stops.push({ type: 'delivery', orderId: order.id, pos: customer.pos });
-        }
+      const customer = customers[order.customer_id];
+      if (customer?.pos) {
+        stops.push({ type: 'delivery', orderId: order.id, pos: customer.pos });
       }
     }
 
@@ -141,9 +137,15 @@ export class RouteInsertionSimulator {
 
     for (let i = 0; i < maxIterations; i++) {
       let activeStops = this._buildActiveStopsFromState(simState);
-      if (activeStops.length === 0) break;
 
-      activeStops = activeStops.filter(s => haversineMeters(currentPos, s.pos) > 1);
+      activeStops = activeStops.filter(s => {
+        if (s.type === 'delivery') {
+          return simState[s.orderId]?.status === 'on_the_way';
+        }
+        return true;
+      });
+
+      if (activeStops.length === 0) break;
 
       if (!pickupInserted && reachedViable) {
         const restaurant = this._world.restaurants[order.restaurant_id];
@@ -179,7 +181,6 @@ export class RouteInsertionSimulator {
         ? this._closestStop(currentPos, urgent)
         : this._closestStop(currentPos, activeStops);
       }
-
       if (!nextStop) break;
 
       const travelTime = await this._estimateTravelTime(currentPos, nextStop.pos, driver);

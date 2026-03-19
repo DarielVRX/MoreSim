@@ -27,6 +27,7 @@ export class RebalancingEngine {
 
     const segmentPromises = stops.map((stop, index) => {
       const fromPos = index === 0 ? driver.pos : stops[index - 1].pos;
+
       return this._etaEstimator.estimate(fromPos, stop.pos, driver, simTime);
     });
 
@@ -42,7 +43,7 @@ export class RebalancingEngine {
         eta += this._estimateRestaurantWaitForOrder(stop.orderId, simTime + eta, simTime);
       }
     }
-
+    console.log('ETA', eta)
     return eta;
   }
 
@@ -66,52 +67,47 @@ export class RebalancingEngine {
       !underCooldown;
 
       if (!transferable) continue;
-
       tail.push(order.id);
+      break;
     }
-
+    console.log('TAIL', tail)
     return tail;
   }
 
   async _estimateBundleCostForDriver(bundleOrderIds, driver, simTime, includeCurrentOrderInState) {
-    let total = 0;
+    console.log(bundleOrderIds)
+    const orderId = bundleOrderIds[0];
+    const order = this._world.orders[orderId];
+    if (!order) return Infinity;
 
-    for (const orderId of bundleOrderIds) {
-      const order = this._world.orders[orderId];
-      if (!order) return Infinity;
+    const [result] = await this._simulator.evaluate({
+      topDrivers: [{ driver, viableStop: { type: 'driver' } }],
+      order,
+      simTime,
+      options: { includeCurrentOrderInState },
+    });
+        console.log(result)
 
-      const [result] = await this._simulator.evaluate({
-        topDrivers: [{ driver, viableStop: { type: 'driver' } }],
-        order,
-        simTime,
-        options: { includeCurrentOrderInState },
-      });
+    if (!result?.valid || !Number.isFinite(result.totalCost)) return Infinity;
 
-      if (!result?.valid || !Number.isFinite(result.totalCost)) return Infinity;
-
-      total += result.totalCost;
-    }
-
-    const loadPenaltyFactor = this._getParam('transfer_load_penalty_s', 120);
-    const loadPenalty = (driver.orders?.length ?? 0) * loadPenaltyFactor;
-
-    return total + loadPenalty;
+    return result.totalCost;
   }
 
   async _findBestRecipientForBundle({ sourceDriver, bundleOrderIds, simTime }) {
-    const sourceBaseRouteEta = await this._estimateRouteEta(sourceDriver, simTime);
+    // sourceBaseCost: coste del driver SIN las órdenes del bundle
+    // (excluimos las órdenes del bundle del estado actual para obtener el baseline correcto)
+    const bundleSet = new Set(bundleOrderIds);
 
     const sourceCost = await this._estimateBundleCostForDriver(
       bundleOrderIds,
       sourceDriver,
       simTime,
-      true
+      false  // ord-113 ya está en driver.orders, no reinsertar
     );
-    console.log('bundle', bundleOrderIds, 'S_Base', sourceBaseRouteEta, 'S_Cost', sourceCost)
 
     if (!Number.isFinite(sourceCost)) return null;
 
-    const sourceMarginal = sourceCost - sourceBaseRouteEta;
+    console.log('S_Cost', sourceCost)
 
     const recipients = Object.values(this._world.drivers)
     .filter((driver) => driver.id !== sourceDriver.id);
@@ -123,22 +119,18 @@ export class RebalancingEngine {
 
         if (activeOrders + bundleOrderIds.length > maxOrders) return null;
 
-        const recipientBaseRouteEta = await this._estimateRouteEta(recipient, simTime);
-
         const recipientCost = await this._estimateBundleCostForDriver(
           bundleOrderIds,
           recipient,
           simTime,
           false
         );
-        console.log('R_Base', recipientBaseRouteEta, 'R_Cost',recipientCost)
 
         if (!Number.isFinite(recipientCost)) return null;
 
-        const recipientMarginal = recipientCost - recipientBaseRouteEta;
-        const gain = sourceMarginal - recipientMarginal;
-        console.log('source', sourceMarginal, 'recipient', recipientMarginal)
-
+        const gain = sourceCost - recipientCost;
+        console.log('R_Cost', recipientCost, 'Gain', gain)
+        console.log('recipients', recipients.length);
         return { driver: recipient, gain };
       })
     );
@@ -241,42 +233,5 @@ export class RebalancingEngine {
     }
 
     return transfers;
-
-    const validProposals = proposals
-    .filter(Boolean)
-    .sort((a, b) => b.gain - a.gain);
-
-    const replans = new Set();
-
-    for (const proposal of validProposals) {
-      const sourceDriver = this._world.drivers[proposal.sourceDriverId];
-      const targetDriver = this._world.drivers[proposal.targetDriverId];
-
-      if (!sourceDriver || !targetDriver) continue;
-
-      for (const orderId of proposal.bundleOrderIds) {
-        const order = this._world.orders[orderId];
-        if (!order) continue;
-
-        order.driver_id = targetDriver.id;
-        order.assigned_at = simTime;
-        order.last_transferred_at = simTime;
-      }
-
-      // 🔥 FIX CRÍTICO: sincronizar ambos drivers
-      this._syncDriverOrders(sourceDriver);
-      this._syncDriverOrders(targetDriver);
-
-      replans.add(sourceDriver.id);
-      replans.add(targetDriver.id);
-    }
-
-    await Promise.all(
-      Array.from(replans).map((driverId) =>
-      this._routingPlanner.replan(this._world.drivers[driverId])
-      )
-    );
-
-    return validProposals.length;
   }
 }

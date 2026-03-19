@@ -87,7 +87,7 @@ export class AssignmentEngine {
     this._finder.update({ variables: vars });
   }
 
-  tick(dtSim, simTime) {
+  async tick(dtSim, simTime) {
     this._simTime = simTime;
     this._tickSimulationCount = 0;
 
@@ -104,11 +104,11 @@ export class AssignmentEngine {
 
     if (!this._rebalancingInFlight) {
       this._rebalancingInFlight = true;
-      this._rebalancer.run(simTime)
-        .finally(() => {
-          this._syncDriverOrdersFromOrderLinks();
-          this._rebalancingInFlight = false;
-        });
+      await this._rebalancer.run(simTime)
+      .finally(() => {
+        this._syncDriverOrdersFromOrderLinks();
+        this._rebalancingInFlight = false;
+      });
     }
 
     const pending = this._buildRetryQueue(simTime);
