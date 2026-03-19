@@ -203,6 +203,9 @@ export class AssignmentEngine {
     const bridgeWeight = this._getParam('pickup_bridge_penalty_factor', 1);
     const activeOrders = candidate.driver?.orders?.length ?? 0;
     const fairnessPenalty = activeOrders * fairnessWeight;
+    const driverName = candidate.driver?.name;
+    const penaltyCount = this._world.driver_penalties?.[driverName] ?? 0;
+    const disconnectPenalty = penaltyCount * this._getParam('disconnect_penalty_s', 300);
 
     const maxSla = this._utils.getDeliverySla(customer);
     const delay = Math.max(0, (candidate.etaToNewCustomer ?? Infinity) - maxSla);
@@ -211,19 +214,22 @@ export class AssignmentEngine {
     const proximityPenalty = Math.max(0, candidate.directDriverToRestaurantMeters ?? 0) * proximityWeight / Math.max(1, this._utils.getSpeedMs(candidate.driver));
     const bridgePenalty = Math.max(0, candidate.bridgePenaltyS ?? 0) * bridgeWeight;
 
+
     return {
       fairnessPenalty,
       softSlaPenalty,
       hardSlaPenalty,
       proximityPenalty,
       bridgePenalty,
+      // disconnectPenalty,
       totalCost:
         (candidate.etaToNewCustomer ?? Infinity) +
         fairnessPenalty +
         softSlaPenalty +
         hardSlaPenalty +
         proximityPenalty +
-        bridgePenalty,
+        bridgePenalty +
+        disconnectPenalty,
     };
   }
   // ── NUEVO: helper para reservas ─────────────────────────────────────────────
@@ -258,8 +264,10 @@ export class AssignmentEngine {
       const activeOrders = driver.orders?.length ?? 0;
       const reserved = this._getDriverReservedSlots(driver);
       const maxOrders = Number.isFinite(driver.max_orders) ? driver.max_orders : 1;
+      const penalties = this._world.driver_penalties?.[driver.name] ?? 0;
+      const maxPenalties = this._getParam('disconnect_penalty_max', 3);
 
-      return (activeOrders + reserved) < maxOrders;
+      return (activeOrders + reserved) < maxOrders && penalties < maxPenalties;
     });
 
     if (capacityFiltered.length === 0) return false;
@@ -330,6 +338,8 @@ export class AssignmentEngine {
       order.driver_id = winner.id;
       order.assigned_at = simTime;
       order._kitchen_elapsed = order._kitchen_elapsed ?? 0;
+      order._last_driver_name   = winner.name;
+      order._reconnect_deadline = null;
 
     this._syncDriverOrdersFromOrderLinks();
 
@@ -363,6 +373,13 @@ export class AssignmentEngine {
     const { orders, customers } = this._world;
 
     if (type === 'at_restaurant') {
+      const inferredRestaurantId = (driver.orders ?? [])
+      .map(id => orders[id])
+      .find(o => o?.status === 'assigned' && o.picked_up_at == null)
+      ?.restaurant_id;
+
+      const restaurantId = driver.current_restaurant_id ?? inferredRestaurantId;
+
       const readyOrders = (driver.orders ?? [])
       .map(id => orders[id])
       .filter(o =>
@@ -370,7 +387,7 @@ export class AssignmentEngine {
       o.driver_id === driver.id &&
       o.kitchen_status === 'ready' &&
       o.picked_up_at == null &&
-      o.restaurant_id === driver.current_restaurant_id
+      o.restaurant_id === restaurantId
       );
       if (readyOrders.length === 0) {
         driver.status = 'waiting_at_restaurant';
