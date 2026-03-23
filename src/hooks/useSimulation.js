@@ -35,6 +35,8 @@ function createEmptyWorld() {
       transfer_max_iterations:        5,
       simulation_budget_per_tick:     75,
       reconnect_window_s:             600,
+      driver_offer_timeout_s:         120,
+      max_customer_restaurant_distance_km: 5,
     },
     drivers:     {},
     restaurants: {},
@@ -206,6 +208,9 @@ export function useSimulation() {
           driver_id:       null,
           triggered:       false,
           assigned_at:     null,
+          offer_sent_at:    null,
+          offer_expires_at: null,
+          offer_answered_at: null,
           triggered_at:    null,
           prep_started_at: null,
           prep_ready_at_estimate: null,
@@ -607,49 +612,42 @@ export function useSimulation() {
       if (!order) return error('Selecciona un pedido para esta acción', { driverId: driver.id });
       if (isTerminalOrder(order)) return error(`El pedido ${order.id} ya no admite acciones manuales`, { driverId: driver.id, orderId: order.id });
 
-      if (action === 'acceptOffer' || action === 'claimOrder') {
-        if (order.driver_id && order.driver_id !== driver.id) return error(`El pedido ${order.id} ya está tomado por otro driver`, { driverId: driver.id, orderId: order.id });
-        if (driver.status === 'offline' || driver.is_available === false) return error(`${driver.name} está offline y no puede tomar pedidos`, { driverId: driver.id, orderId: order.id });
+      if (action === 'acceptOffer') {
+        const result = assignRef.current?.acceptDriverOffer?.(order.id, driver.id, simTimeNow);
+        return result?.ok
+          ? success(`✅ ${result.message}`, { driverId: driver.id, orderId: order.id })
+          : error(result?.message ?? `No se pudo aceptar ${order.id}`, { driverId: driver.id, orderId: order.id });
+      }
 
-        const restaurant = world.restaurants[order.restaurant_id];
-        if (restaurant && restaurant.manual_open_override === false) {
-          return error(`${restaurant.name} está pausado y no acepta retiros`, { driverId: driver.id, orderId: order.id, restaurantId: restaurant.id });
-        }
-
-        order.driver_id = driver.id;
-        order.status = 'assigned';
-        order.assigned_at = Number.isFinite(order.assigned_at) ? order.assigned_at : simTimeNow;
-        order.triggered = true;
-        order.triggered_at = Number.isFinite(order.triggered_at) ? order.triggered_at : simTimeNow;
-        driver.orders = Array.from(new Set([...(driver.orders ?? []), order.id]));
-        driver.status = 'moving_to_pickup';
-        driver.current_restaurant_id = order.restaurant_id;
-        assignRef.current?._syncDriverOrdersFromOrderLinks?.();
-        assignRef.current?._routingPlanner?.replan(driver);
-        return success(`✅ ${driver.name} ${action === 'claimOrder' ? 'reclamó' : 'aceptó'} ${order.id}`, { driverId: driver.id, orderId: order.id });
+      if (action === 'claimOrder') {
+        const result = assignRef.current?.forceAssignOrderToDriver?.(order.id, driver.id, simTimeNow);
+        return result?.ok
+          ? success(`🛵 ${result.message}`, { driverId: driver.id, orderId: order.id })
+          : error(result?.message ?? `No se pudo tomar ${order.id}`, { driverId: driver.id, orderId: order.id });
       }
 
       if (action === 'rejectOffer') {
-        order.manual_rejections = (order.manual_rejections ?? 0) + 1;
-        order.last_rejected_driver_id = driver.id;
-        order.last_rejected_at = simTimeNow;
-        order.next_retry_at = Math.max(order.next_retry_at ?? 0, simTimeNow + 5);
-        return success(`❌ ${driver.name} rechazó ${order.id}; se reagendará para reintento`, { driverId: driver.id, orderId: order.id });
+        const result = assignRef.current?.rejectDriverOffer?.(order.id, driver.id, simTimeNow, 'manual_reject');
+        return result?.ok
+          ? success(`❌ ${result.message}`, { driverId: driver.id, orderId: order.id })
+          : error(result?.message ?? `No se pudo rechazar ${order.id}`, { driverId: driver.id, orderId: order.id });
       }
 
       if (action === 'requestRebalance') {
         if (order.driver_id !== driver.id) return error(`El pedido ${order.id} no está asignado a ${driver.name}`, { driverId: driver.id, orderId: order.id });
-        detachOrderFromDriver(order);
         order.rebalance_requested_at = simTimeNow;
-        queueOrderAgain(order);
-        return success(`🔄 ${driver.name} pidió rebalanceo para ${order.id}; volvió a cola`, { driverId: driver.id, orderId: order.id });
+        const result = assignRef.current?.requeueOrder?.(order.id, simTimeNow, 'manual_rebalance');
+        return result?.ok
+          ? success(`🔄 ${driver.name} pidió rebalanceo para ${order.id}; volvió a cola`, { driverId: driver.id, orderId: order.id })
+          : error(result?.message ?? `No se pudo rebalancear ${order.id}`, { driverId: driver.id, orderId: order.id });
       }
 
       if (action === 'releaseOrder') {
         if (order.driver_id !== driver.id) return error(`El pedido ${order.id} no está asignado a ${driver.name}`, { driverId: driver.id, orderId: order.id });
-        detachOrderFromDriver(order);
-        queueOrderAgain(order);
-        return success(`🧯 ${driver.name} liberó ${order.id}; volvió a cola`, { driverId: driver.id, orderId: order.id });
+        const result = assignRef.current?.requeueOrder?.(order.id, simTimeNow, 'manual_release');
+        return result?.ok
+          ? success(`🧯 ${driver.name} liberó ${order.id}; volvió a cola`, { driverId: driver.id, orderId: order.id })
+          : error(result?.message ?? `No se pudo liberar ${order.id}`, { driverId: driver.id, orderId: order.id });
       }
 
       return error(`Acción de driver no soportada: ${action}`, { driverId: driver.id });
@@ -702,6 +700,9 @@ export function useSimulation() {
       if (action === 'cancelOrder') {
         detachOrderFromDriver(order);
         order.driver_id = null;
+        order.offer_sent_at = null;
+        order.offer_expires_at = null;
+        order.offer_answered_at = simTimeNow;
         order.status = 'cancelled';
         order.cancelled_by = 'restaurant';
         order.cancelled_at = simTimeNow;
@@ -732,6 +733,9 @@ export function useSimulation() {
         if (isTerminalOrder(order)) return error(`El pedido ${order.id} ya está cerrado`, { customerId: customer.id, orderId: order.id });
         detachOrderFromDriver(order);
         order.driver_id = null;
+        order.offer_sent_at = null;
+        order.offer_expires_at = null;
+        order.offer_answered_at = simTimeNow;
         order.status = 'cancelled';
         order.cancelled_by = 'customer';
         order.cancelled_at = simTimeNow;
@@ -907,7 +911,7 @@ function computeMetrics(world) {
 
   return {
     delivered_count:    delivered.length,
-    pending_count:      orders.filter(o => o.status === 'queued').length,
+    pending_count:      orders.filter(o => ['queued', 'offer_pending'].includes(o.status)).length,
     active_count:       orders.filter(o => ['assigned','on_the_way'].includes(o.status)).length,
     avg_wait_s:         +avgWaitMs.toFixed(1),
     total_dead_km:      +totalDeadKm.toFixed(2),

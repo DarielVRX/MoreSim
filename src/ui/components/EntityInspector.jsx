@@ -102,7 +102,7 @@ export default function EntityInspector({ sim, selected, onSelect }) {
             key={c.id}
             icon="📍"
             label={c.name}
-            status={`dist. max: ${c.max_distance_km}km`}
+            status={'cliente'}
             selected={selected?.id === c.id}
             expanded={expandedEntity === c.id}
             onRowClick={() => { onSelect({ type: 'customer', id: c.id }); toggleEntity(c.id); }}
@@ -316,11 +316,9 @@ function CustomerFields({ customer, sim, canEdit }) {
         <input value={customer.name} disabled={!canEdit}
           onChange={e => update({ name: e.target.value })} />
       </Field>
-      <Field label="Distancia máx. comercio→cliente (km)">
-        <input type="number" min="0.5" max="50" step="0.5" value={customer.max_distance_km}
-          disabled={!canEdit}
-          onChange={e => update({ max_distance_km: +e.target.value })} />
-      </Field>
+      <div style={{ background: 'var(--bg-2)', borderRadius: 'var(--radius-sm)', padding: '8px 10px', fontSize: 11, color: 'var(--text-1)' }}>
+        La distancia máxima cliente↔comercio ahora se controla globalmente desde Roles → Engine.
+      </div>
     </div>
   );
 }

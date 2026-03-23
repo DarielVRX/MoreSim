@@ -105,7 +105,6 @@ export function serializeWorld(world, variables) {
     customers: Object.fromEntries(
       Object.entries(world.customers).map(([id, c]) => [id, {
         id: c.id, name: c.name, pos: c.pos,
-        max_distance_km: c.max_distance_km,
       }])
     ),
     orders: Object.fromEntries(
