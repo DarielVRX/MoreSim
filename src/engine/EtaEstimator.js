@@ -17,7 +17,13 @@ export class EtaEstimator {
   }
 
   _key(pos) {
-    return `${this._quantize(pos.lat)}:${this._quantize(pos.lng)}`;
+    const latMeters = pos.lat * 111320;
+    const lngMeters = pos.lng * 111320 * Math.cos(pos.lat * Math.PI / 180);
+
+    const qLat = Math.round(latMeters / this._gridSizeMeters);
+    const qLng = Math.round(lngMeters / this._gridSizeMeters);
+
+    return `${qLat}:${qLng}`;
   }
 
   _buildCacheKey(fromPos, toPos, driver) {

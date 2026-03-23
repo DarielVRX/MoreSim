@@ -42,8 +42,12 @@ export class AssignmentCandidateFinder {
     return radiusKm * 1000;
   }
 
-  _estimateTravelTime(fromPos, toPos, driver = null, traceId = null) {
-    const duration_s = this._etaEstimator.estimate(fromPos, toPos, driver);
+  _getNearbyDriverPreferenceMeters() {
+    return Math.max(25, this._world?.params?.nearby_driver_preference_m ?? 250);
+  }
+
+  _estimateTravelTime(fromPos, toPos, driver = null, simTime = 0, traceId = null) {
+    const duration_s = this._etaEstimator.estimate(fromPos, toPos, driver, simTime);
     this._log('eta', { traceId, duration_s, fromPos, toPos });
     return duration_s;
   }
@@ -80,16 +84,7 @@ export class AssignmentCandidateFinder {
     return candidates[0];
   }
 
-  _approximateCandidateScore(driver, viableStop, restaurant, customer) {
-    const activeOrders = driver.orders?.length ?? 0;
-    const loadPenalty = activeOrders * 180;
-    const etaToRestaurant = this._estimateTravelTime(viableStop.pos, restaurant.pos, driver);
-    const etaRestaurantToCustomer = this._estimateTravelTime(restaurant.pos, customer.pos, driver);
-    const totalEta = etaToRestaurant + etaRestaurantToCustomer;
-    return totalEta + loadPenalty;
-  }
-
-  async _estimateEtaToViableStop(driver, viableStop, traceId) {
+  async _estimateEtaToViableStop(driver, viableStop, traceId, simTime) {
     if (!viableStop || viableStop.type === 'driver') return 0;
 
     const stops = this._routingPlanner.buildStops(driver, this._world);
@@ -112,12 +107,52 @@ export class AssignmentCandidateFinder {
     return 0;
   }
 
-  async find(order, { restaurant, customer }) {
+  async _buildCandidateEnvelope(driver, viableStop, restaurant, customer, simTime, traceId) {
+    const activeOrders = driver.orders?.length ?? 0;
+    const loadPenalty = activeOrders * 180;
+    const directDriverToRestaurantMeters = haversineMeters(driver.pos, restaurant.pos);
+
+    const [etaToViableStop, etaViableToRestaurant, etaRestaurantToCustomer] = await Promise.all([
+      this._estimateEtaToViableStop(driver, viableStop, traceId, simTime),
+      this._estimateTravelTime(viableStop.pos, restaurant.pos, driver, simTime, traceId),
+      this._estimateTravelTime(restaurant.pos, customer.pos, driver, simTime, traceId),
+    ]);
+
+    const speedMs = this._utils.getSpeedMs(driver);
+    const driverBridgeMeters = Math.max(0, directDriverToRestaurantMeters - (viableStop.distToRestaurant ?? 0));
+    const bridgePenaltyS = driverBridgeMeters / speedMs;
+    const proximityPenaltyS = directDriverToRestaurantMeters / speedMs;
+    const approxScore =
+      etaToViableStop +
+      etaViableToRestaurant +
+      etaRestaurantToCustomer +
+      loadPenalty +
+      bridgePenaltyS +
+      proximityPenaltyS * 0.35;
+
+    return {
+      driver,
+      viableStop,
+      approxScore,
+      etaToViableStop,
+      etaViableToRestaurant,
+      etaRestaurantToCustomer,
+      etaToRestaurant: etaToViableStop + etaViableToRestaurant,
+      etaCandidate: etaToViableStop + etaViableToRestaurant + etaRestaurantToCustomer,
+      etaTotalPrelim: etaToViableStop + etaViableToRestaurant,
+      directDriverToRestaurantMeters,
+      bridgePenaltyS,
+      loadPenalty,
+    };
+  }
+
+  async find(order, { restaurant, customer, simTime = 0 }) {
     const traceId = `order_${order.id}_${Date.now()}`;
     const maxPickupRadiusM = this._getMaxPickupRadiusMeters();
     const hardTopK = Math.max(1, this._world?.params?.assignment_hard_top_k ?? 5);
+    const nearbyDriverPreferenceM = this._getNearbyDriverPreferenceMeters();
 
-    const viableDrivers = Object.values(this._world.drivers)
+    const rawDrivers = Object.values(this._world.drivers)
       .map((driver) => {
         if (!this._isDriverConnected(driver) || !this._hasValidPos(driver?.pos)) return null;
         const activeOrders = driver.orders?.length ?? 0;
@@ -129,37 +164,41 @@ export class AssignmentCandidateFinder {
         const viableStop = this._getClosestViableStop(driver, restaurant.pos, maxPickupRadiusM, traceId);
         if (!viableStop) return null;
 
-        const approxScore = this._approximateCandidateScore(driver, viableStop, restaurant, customer);
-        return { driver, viableStop, approxScore };
+        return { driver, viableStop };
       })
-      .filter(Boolean)
-      .sort((a, b) => a.approxScore - b.approxScore);
+      .filter(Boolean);
 
-    const reducedCandidates = viableDrivers.slice(0, hardTopK);
+    const viableDrivers = (await Promise.all(
+      rawDrivers.map(({ driver, viableStop }) =>
+        this._buildCandidateEnvelope(driver, viableStop, restaurant, customer, simTime, traceId)
+      )
+    )).sort((a, b) => a.approxScore - b.approxScore);
 
-    const candidates = await Promise.all(
-      reducedCandidates.map(async ({ driver, viableStop, approxScore }) => {
-        const [etaToViableStop, etaViableToRestaurant, etaRestaurantToCustomer] = await Promise.all([
-          this._estimateEtaToViableStop(driver, viableStop, traceId),
-          this._estimateTravelTime(viableStop.pos, restaurant.pos, driver, traceId),
-          this._estimateTravelTime(restaurant.pos, customer.pos, driver, traceId),
-        ]);
-
-        const etaToRestaurant = etaToViableStop + etaViableToRestaurant;
-        const etaCandidate = etaToRestaurant + etaRestaurantToCustomer;
-
-        return {
-          driver,
-          viableStop,
-          approxScore,
-          etaToRestaurant,
-          etaCandidate,
-          etaTotalPrelim: etaToRestaurant,
-        };
-      })
+    const preferredNearby = viableDrivers.filter(({ directDriverToRestaurantMeters, viableStop }) =>
+      directDriverToRestaurantMeters <= nearbyDriverPreferenceM ||
+      (viableStop?.distToRestaurant ?? Infinity) <= nearbyDriverPreferenceM
     );
 
-    candidates.sort((a, b) => a.etaTotalPrelim - b.etaTotalPrelim);
+    const reducedCandidates = [];
+    const seen = new Set();
+
+    for (const candidate of [...preferredNearby, ...viableDrivers.slice(0, hardTopK)]) {
+      if (seen.has(candidate.driver.id)) continue;
+      seen.add(candidate.driver.id);
+      reducedCandidates.push(candidate);
+    }
+
+    const candidates = reducedCandidates
+      .map((candidate) => ({
+        ...candidate,
+        etaToRestaurant: candidate.etaToRestaurant,
+        etaCandidate: candidate.etaCandidate,
+        etaTotalPrelim: candidate.etaTotalPrelim,
+      }))
+      .sort((a, b) => {
+        if (a.etaTotalPrelim !== b.etaTotalPrelim) return a.etaTotalPrelim - b.etaTotalPrelim;
+        return a.directDriverToRestaurantMeters - b.directDriverToRestaurantMeters;
+      });
 
     return {
       viableDrivers,

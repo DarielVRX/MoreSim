@@ -3,13 +3,11 @@ import { useState }     from 'react';
 import EntityInspector  from './components/EntityInspector.jsx';
 import AlgorithmPanel   from './components/AlgorithmPanel.jsx';
 import ScenariosPanel   from './components/ScenariosPanel.jsx';
-import RoleActionsPanel from './components/RoleActionsPanel.jsx';
 
 const TABS = [
   { id: 'entities',  label: 'Entidades' },
-  { id: 'roles',     label: 'Roles' },
-  { id: 'algorithm', label: 'Algoritmo' },
-  { id: 'scenarios', label: 'Escenarios' },
+{ id: 'algorithm', label: 'Algoritmo' },
+{ id: 'scenarios', label: 'Escenarios' },
 ];
 
 function cleanStaleEntities(sim) {
@@ -132,9 +130,6 @@ export default function SidePanel({ sim, activeTab, onTabChange, selected, onSel
     <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
     {activeTab === 'entities'  && (
       <EntityInspector sim={sim} selected={selected} onSelect={onSelect} />
-    )}
-    {activeTab === 'roles' && (
-      <RoleActionsPanel sim={sim} />
     )}
     {activeTab === 'algorithm' && (
       <AlgorithmPanel sim={sim} />

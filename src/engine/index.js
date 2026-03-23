@@ -37,7 +37,6 @@ export function createDriver(pos, overrides = {}) {
     segment_elapsed: 0,          // segundos recorridos en el segmento actual
     stop_elapsed:  0,            // segundos en stop (semáforo/esquina)
     stop_duration: 0,            // duración total del stop actual
-    is_available:  true,
     metrics: {
       dead_km:          0,
       idle_time_s:      0,
@@ -64,27 +63,27 @@ export function createRestaurant(pos, overrides = {}) {
       driver_rating: overrides.metrics?.driver_rating ?? 5.0,
       user_rating:   overrides.metrics?.user_rating   ?? 5.0,
     },
-    manual_open_override: overrides.manual_open_override ?? true,
     orders_config: overrides.orders_config ?? [],
     ...overrides,
   };
 }
 
 // ─── Customer ─────────────────────────────────────────────────────────────────
+// max_distance_km: restricción de distancia para recibir pedidos (no afecta scoring)
 export function createCustomer(pos, overrides = {}) {
   return {
     id:            uid('cus'),
-    name:          overrides.name || `Cliente ${_nextId - 1}`,
+    name:          overrides.name           || `Cliente ${_nextId - 1}`,
     pos:           { ...pos },
+    max_distance_km: overrides.max_distance_km ?? 5,
     ...overrides,
   };
 }
 
 // ─── Order ────────────────────────────────────────────────────────────────────
-// status: 'queued' | 'offer_pending' | 'assigned' | 'preparing' | 'ready' | 'on_the_way' | 'delivered'
+// status: 'queued' | 'assigned' | 'preparing' | 'ready' | 'on_the_way' | 'delivered'
 //
 // NOTA CRÍTICA: preparing y ready son independientes de assigned y on_the_way.
-// Un pedido puede estar 'offer_pending' mientras espera respuesta del driver.
 // Un pedido puede estar 'assigned' mientras está 'preparing'.
 // El driver puede llegar al restaurante y esperar hasta que pase a 'ready'.
 // Los estados de cocina (preparing → ready) los controla prep_time_s del restaurante.
@@ -107,9 +106,6 @@ export function createOrder(restaurant_id, customer_id, overrides = {}) {
     trigger:           overrides.trigger      ?? 'manual',   // 'manual' | number (sim seconds)
     triggered:         false,        // ya fue lanzado al engine
     assigned_at:       null,
-    offer_sent_at:      null,
-    offer_expires_at:   null,
-    offer_answered_at:  null,
     triggered_at:      null,
     prep_started_at:   null,
     prep_ready_at_estimate: null,

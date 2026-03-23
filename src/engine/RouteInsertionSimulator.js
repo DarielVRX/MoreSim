@@ -1,3 +1,4 @@
+import { getRemainingPrepTime } from './OrderTiming.js';
 import { haversineMeters } from './GraphCache.js';
 
 export class RouteInsertionSimulator {
@@ -25,10 +26,8 @@ export class RouteInsertionSimulator {
 
     for (const orderId of driver.orders ?? []) {
       if (!includeCurrentOrderInState && orderId === candidateOrderId) continue;
-
       const o = orders[orderId];
       if (!o) continue;
-
       state[orderId] = {
         orderId,
         status: o.status,
@@ -36,7 +35,7 @@ export class RouteInsertionSimulator {
       };
     }
 
-    if (!includeCurrentOrderInState || !state[candidateOrderId]) {
+    if (!state[candidateOrderId]) {
       state[candidateOrderId] = {
         orderId: candidateOrderId,
         status: 'assigned',
@@ -63,11 +62,9 @@ export class RouteInsertionSimulator {
         }
       }
 
-      if (orderState.status === 'on_the_way') {
-        const customer = customers[order.customer_id];
-        if (customer?.pos) {
-          stops.push({ type: 'delivery', orderId: order.id, pos: customer.pos });
-        }
+      const customer = customers[order.customer_id];
+      if (customer?.pos) {
+        stops.push({ type: 'delivery', orderId: order.id, pos: customer.pos });
       }
     }
 
@@ -115,15 +112,8 @@ export class RouteInsertionSimulator {
   _estimateRestaurantWait(orderId, arrivalTime, simTime) {
     const order = this._world.orders[orderId];
     if (!order) return 0;
-    if (order.kitchen_status === 'ready') return 0;
 
-    const restaurant = this._world.restaurants[order.restaurant_id];
-    const prepTime = restaurant?.prep_time_s ?? 600;
-    const cooked = order._kitchen_elapsed ?? 0;
-    const remainingAtNow = Math.max(0, prepTime - cooked);
-
-    const elapsedUntilArrival = Math.max(0, arrivalTime - simTime);
-    return Math.max(0, remainingAtNow - elapsedUntilArrival);
+    return getRemainingPrepTime(order, this._world, arrivalTime);
   }
 
   async _simulateDriverWithOrder({ driver, order, viableStop, simTime, includeCurrentOrderInState = false }) {
@@ -147,9 +137,15 @@ export class RouteInsertionSimulator {
 
     for (let i = 0; i < maxIterations; i++) {
       let activeStops = this._buildActiveStopsFromState(simState);
-      if (activeStops.length === 0) break;
 
-      activeStops = activeStops.filter(s => haversineMeters(currentPos, s.pos) > 1);
+      activeStops = activeStops.filter(s => {
+        if (s.type === 'delivery') {
+          return simState[s.orderId]?.status === 'on_the_way';
+        }
+        return true;
+      });
+
+      if (activeStops.length === 0) break;
 
       if (!pickupInserted && reachedViable) {
         const restaurant = this._world.restaurants[order.restaurant_id];
@@ -170,8 +166,14 @@ export class RouteInsertionSimulator {
         nextStop = activeStops.find(s => this._isSameStop(s, expected)) ?? null;
       }
 
-      if (!pickupInserted && reachedViable && !nextStop) {
-        nextStop = activeStops.find(s => s.type === 'pickup' && s.orderId === order.id) ?? null;
+      if (!pickupInserted && reachedViable) {
+        const pickupStop = activeStops.find(
+          s => s.type === 'pickup' && s.orderId === order.id
+        );
+
+        if (pickupStop) {
+          nextStop = pickupStop;
+        }
       }
 
       if (!nextStop) {
@@ -179,7 +181,6 @@ export class RouteInsertionSimulator {
         ? this._closestStop(currentPos, urgent)
         : this._closestStop(currentPos, activeStops);
       }
-
       if (!nextStop) break;
 
       const travelTime = await this._estimateTravelTime(currentPos, nextStop.pos, driver);

@@ -87,7 +87,7 @@ export class AssignmentEngine {
     this._finder.update({ variables: vars });
   }
 
-  tick(dtSim, simTime) {
+  async tick(dtSim, simTime) {
     this._simTime = simTime;
     this._tickSimulationCount = 0;
 
@@ -100,15 +100,16 @@ export class AssignmentEngine {
 
     this._syncDriverOrdersFromOrderLinks();
     this._kitchen.tick(dtSim, simTime);
+    this._expireDriverOffers(simTime);
     this._syncWaitingDrivers(simTime, dtSim);
 
     if (!this._rebalancingInFlight) {
       this._rebalancingInFlight = true;
-      this._rebalancer.run(simTime)
-        .finally(() => {
-          this._syncDriverOrdersFromOrderLinks();
-          this._rebalancingInFlight = false;
-        });
+      await this._rebalancer.run(simTime)
+      .finally(() => {
+        this._syncDriverOrdersFromOrderLinks();
+        this._rebalancingInFlight = false;
+      });
     }
 
     const pending = this._buildRetryQueue(simTime);
@@ -151,10 +152,46 @@ export class AssignmentEngine {
     }
   }
 
+  _expireDriverOffers(simTime) {
+    for (const order of Object.values(this._world.orders)) {
+      if (order.status !== 'offer_pending') continue;
+      if (!Number.isFinite(order.offer_expires_at) || order.offer_expires_at > simTime) continue;
+
+      const driver = order.driver_id ? this._world.drivers[order.driver_id] : null;
+      const driverName = driver?.name ?? order._last_driver_name ?? order.driver_id;
+
+      order.driver_id = null;
+      order.status = 'queued';
+      order.offer_answered_at = simTime;
+      order.offer_expires_at = null;
+      order.offer_sent_at = null;
+      order.assigned_at = null;
+      order.next_retry_at = simTime;
+      order.last_offer_result = 'expired';
+
+      this._onEvent({
+        time: simTime,
+        type: 'role_action_error',
+        message: `⌛ Oferta expirada para ${order.id}${driverName ? ` (${driverName})` : ''}`,
+        orderId: order.id,
+        driverId: driver?.id ?? null,
+      });
+
+      this._tryAssign(order, simTime);
+    }
+  }
+
   handleOrderCreated(orderId, simTime) {
     this._log('order_created', { orderId });
     const order = this._world.orders[orderId];
     if (order && !Number.isFinite(order.created_at)) order.created_at = simTime;
+    if (order && !Number.isFinite(order.triggered_at)) order.triggered_at = simTime;
+    if (order) {
+      order.prep_started_at = Number.isFinite(order.prep_started_at) ? order.prep_started_at : simTime;
+      order.prep_ready_at_estimate = Number.isFinite(order.prep_ready_at_estimate)
+        ? order.prep_ready_at_estimate
+        : simTime + (this._world.restaurants[order.restaurant_id]?.prep_time_s ?? 600);
+    }
     if (order) this._tryAssign(order, simTime);
   }
 
@@ -192,19 +229,37 @@ export class AssignmentEngine {
     const fairnessWeight = this._getParam('fairness_penalty_per_order_s', 120);
     const softSlaWeight = this._getParam('soft_sla_penalty_factor', 2);
     const hardPenalty = this._getParam('hard_sla_penalty_s', 3000);
+    const proximityWeight = this._getParam('pickup_proximity_penalty_factor', 0.35);
+    const bridgeWeight = this._getParam('pickup_bridge_penalty_factor', 1);
     const activeOrders = candidate.driver?.orders?.length ?? 0;
     const fairnessPenalty = activeOrders * fairnessWeight;
+    const driverName = candidate.driver?.name;
+    const penaltyCount = this._world.driver_penalties?.[driverName] ?? 0;
+    const disconnectPenalty = penaltyCount * this._getParam('disconnect_penalty_s', 300);
 
     const maxSla = this._utils.getDeliverySla(customer);
     const delay = Math.max(0, (candidate.etaToNewCustomer ?? Infinity) - maxSla);
     const softSlaPenalty = delay * softSlaWeight;
     const hardSlaPenalty = delay > 0 ? hardPenalty : 0;
+    const proximityPenalty = Math.max(0, candidate.directDriverToRestaurantMeters ?? 0) * proximityWeight / Math.max(1, this._utils.getSpeedMs(candidate.driver));
+    const bridgePenalty = Math.max(0, candidate.bridgePenaltyS ?? 0) * bridgeWeight;
+
 
     return {
       fairnessPenalty,
       softSlaPenalty,
       hardSlaPenalty,
-      totalCost: (candidate.etaToNewCustomer ?? Infinity) + fairnessPenalty + softSlaPenalty + hardSlaPenalty,
+      proximityPenalty,
+      bridgePenalty,
+      // disconnectPenalty,
+      totalCost:
+        (candidate.etaToNewCustomer ?? Infinity) +
+        fairnessPenalty +
+        softSlaPenalty +
+        hardSlaPenalty +
+        proximityPenalty +
+        bridgePenalty +
+        disconnectPenalty,
     };
   }
   // ── NUEVO: helper para reservas ─────────────────────────────────────────────
@@ -227,8 +282,16 @@ export class AssignmentEngine {
     if (!restaurant || !customer) return false;
 
     const distKm = haversineMeters(restaurant.pos, customer.pos) / 1000;
-    if (customer.max_distance_km > 0 && distKm > customer.max_distance_km) {
+    const maxDistanceKm = this._getParam('max_customer_restaurant_distance_km', 5);
+    if (maxDistanceKm > 0 && distKm > maxDistanceKm) {
       order.status = 'cancelled';
+      order.cancelled_by = 'distance_limit';
+      this._onEvent({
+        time: simTime,
+        type: 'role_action_error',
+        message: `📏 ${order.id} excede distancia máxima comercio→cliente (${distKm.toFixed(2)} km)`,
+        orderId: order.id,
+      });
       return true;
     }
 
@@ -239,8 +302,10 @@ export class AssignmentEngine {
       const activeOrders = driver.orders?.length ?? 0;
       const reserved = this._getDriverReservedSlots(driver);
       const maxOrders = Number.isFinite(driver.max_orders) ? driver.max_orders : 1;
+      const penalties = this._world.driver_penalties?.[driver.name] ?? 0;
+      const maxPenalties = this._getParam('disconnect_penalty_max', 3);
 
-      return (activeOrders + reserved) < maxOrders;
+      return (activeOrders + reserved) < maxOrders && penalties < maxPenalties;
     });
 
     if (capacityFiltered.length === 0) return false;
@@ -268,8 +333,9 @@ export class AssignmentEngine {
       ...this._scoreCandidate(candidate, customer)
     }));
 
-    const pool = scored.filter((item) => item.validExisting);
-    const source = pool.length > 0 ? pool : scored;
+    const validPool = scored.filter((item) => item.valid);
+    const existingSlaPool = scored.filter((item) => item.validExisting);
+    const source = validPool.length > 0 ? validPool : (existingSlaPool.length > 0 ? existingSlaPool : scored);
     const winnerData = source.sort((a, b) => a.totalCost - b.totalCost)[0];
 
     if (!winnerData) {
@@ -287,7 +353,7 @@ export class AssignmentEngine {
       }
     }
 
-    await this._applyAssignment({
+    await this._offerOrderToDriver({
       order,
       winnerData,
       startedAtMs,
@@ -297,30 +363,40 @@ export class AssignmentEngine {
     });
 
     return true;
-    }
+  }
 
-    async _applyAssignment({ order, winnerData, startedAtMs, simTime, restaurant, customer }) {
-      const winner = winnerData.driver;
+  async _offerOrderToDriver({ order, winnerData, startedAtMs, simTime, restaurant }) {
+    const winner = winnerData.driver;
 
-      // liberar reserva del ganador (se convierte en asignación real)
-      this._releaseDriverSlot(winner);
+    this._releaseDriverSlot(winner);
 
-      order.assignment_score = winnerData.totalCost;
-      order.status = 'assigned';
-      order.driver_id = winner.id;
-      order.assigned_at = simTime;
-      order._kitchen_elapsed = order._kitchen_elapsed ?? 0;
-
-    this._syncDriverOrdersFromOrderLinks();
+    order.assignment_score = winnerData.totalCost;
+    order.status = 'offer_pending';
+    order.driver_id = winner.id;
+    order.offer_sent_at = simTime;
+    order.offer_expires_at = simTime + this._getParam('driver_offer_timeout_s', 120);
+    order.offer_answered_at = null;
+    order.assigned_at = null;
+    order._kitchen_elapsed = order._kitchen_elapsed ?? 0;
+    order._last_driver_name = winner.name;
+    order._reconnect_deadline = null;
 
     try {
-      const route = await fetchOSRMRoute(restaurant.pos, customer.pos);
+      const route = await fetchOSRMRoute(restaurant.pos, this._world.customers[order.customer_id].pos);
       order.route_distance_km = route.distance_m / 1000;
     } catch {
-      order.route_distance_km = haversineMeters(restaurant.pos, customer.pos) / 1000;
+      order.route_distance_km = haversineMeters(restaurant.pos, this._world.customers[order.customer_id].pos) / 1000;
     }
 
-    this._log('assigned', {
+    this._onEvent({
+      time: simTime,
+      type: 'role_action',
+      message: `📲 Oferta enviada a ${winner.name} para ${order.id} (${this._getParam('driver_offer_timeout_s', 120)}s)`,
+      orderId: order.id,
+      driverId: winner.id,
+    });
+
+    this._log('offer_sent', {
       order: order.id,
       driver: winner.name,
       eta: winnerData.etaToNewCustomer,
@@ -328,10 +404,125 @@ export class AssignmentEngine {
       fairnessPenalty: winnerData.fairnessPenalty,
       softSlaPenalty: winnerData.softSlaPenalty,
       hardSlaPenalty: winnerData.hardSlaPenalty,
+      proximityPenalty: winnerData.proximityPenalty,
+      bridgePenalty: winnerData.bridgePenalty,
       compute_ms: Date.now() - startedAtMs,
     });
+  }
 
-    await this._routingPlanner.replan(winner);
+  acceptDriverOffer(orderId, driverId, simTime) {
+    this._simTime = simTime;
+    const order = this._world.orders[orderId];
+    const driver = this._world.drivers[driverId];
+    if (!order || !driver) return { ok: false, message: 'Oferta inválida' };
+    if (order.status !== 'offer_pending') return { ok: false, message: `El pedido ${orderId} no está esperando aceptación` };
+    if (order.driver_id !== driverId) return { ok: false, message: `La oferta ${orderId} no pertenece a ${driver.name}` };
+    if (driver.is_available === false || driver.status === 'offline') return { ok: false, message: `${driver.name} está offline` };
+
+    order.status = 'assigned';
+    order.assigned_at = simTime;
+    order.offer_answered_at = simTime;
+    order.offer_expires_at = null;
+    driver.status = 'moving_to_pickup';
+    driver.current_restaurant_id = order.restaurant_id;
+
+    this._syncDriverOrdersFromOrderLinks();
+    this._routingPlanner.replan(driver);
+    this._onEvent({
+      time: simTime,
+      type: 'assigned',
+      message: `✅ ${driver.name} aceptó ${order.id}`,
+      orderId: order.id,
+      driverId: driver.id,
+    });
+
+    return { ok: true, message: `${driver.name} aceptó ${order.id}` };
+  }
+
+  rejectDriverOffer(orderId, driverId, simTime, reason = 'manual_reject') {
+    this._simTime = simTime;
+    const order = this._world.orders[orderId];
+    const driver = this._world.drivers[driverId];
+    if (!order || !driver) return { ok: false, message: 'Oferta inválida' };
+    if (order.status !== 'offer_pending') return { ok: false, message: `El pedido ${orderId} no tiene oferta activa` };
+    if (order.driver_id !== driverId) return { ok: false, message: `La oferta ${orderId} no pertenece a ${driver.name}` };
+
+    order.driver_id = null;
+    order.status = 'queued';
+    order.offer_answered_at = simTime;
+    order.offer_expires_at = null;
+    order.offer_sent_at = null;
+    order.last_offer_result = reason;
+    order.next_retry_at = simTime;
+
+    this._onEvent({
+      time: simTime,
+      type: 'role_action_error',
+      message: `❌ ${driver.name} rechazó ${order.id}`,
+      orderId: order.id,
+      driverId: driver.id,
+    });
+
+    this._tryAssign(order, simTime);
+    return { ok: true, message: `${driver.name} rechazó ${order.id}` };
+  }
+
+  forceAssignOrderToDriver(orderId, driverId, simTime) {
+    this._simTime = simTime;
+    const order = this._world.orders[orderId];
+    const driver = this._world.drivers[driverId];
+    if (!order || !driver) return { ok: false, message: 'Pedido o driver inválido' };
+    if (['cancelled', 'delivered', 'on_the_way'].includes(order.status)) return { ok: false, message: `El pedido ${orderId} no puede ser tomado` };
+    if (driver.is_available === false || driver.status === 'offline') return { ok: false, message: `${driver.name} está offline` };
+
+    order.driver_id = driverId;
+    order.status = 'assigned';
+    order.assigned_at = simTime;
+    order.offer_sent_at = null;
+    order.offer_expires_at = null;
+    order.offer_answered_at = simTime;
+    order.triggered = true;
+    driver.status = 'moving_to_pickup';
+    driver.current_restaurant_id = order.restaurant_id;
+
+    this._syncDriverOrdersFromOrderLinks();
+    this._routingPlanner.replan(driver);
+    this._onEvent({
+      time: simTime,
+      type: 'assigned',
+      message: `🛵 ${driver.name} tomó manualmente ${order.id}`,
+      orderId: order.id,
+      driverId: driver.id,
+    });
+
+    return { ok: true, message: `${driver.name} tomó ${order.id}` };
+  }
+
+  requeueOrder(orderId, simTime, reason = 'manual_requeue') {
+    this._simTime = simTime;
+    const order = this._world.orders[orderId];
+    if (!order) return { ok: false, message: 'Pedido no encontrado' };
+
+    const driver = order.driver_id ? this._world.drivers[order.driver_id] : null;
+    if (driver) {
+      driver.orders = (driver.orders ?? []).filter(id => id !== order.id);
+      if ((driver.orders ?? []).length === 0 && driver.status !== 'offline') driver.status = 'idle';
+      this._routingPlanner.replan(driver);
+    }
+
+    order.driver_id = null;
+    order.status = 'queued';
+    order.assigned_at = null;
+    order.offer_sent_at = null;
+    order.offer_expires_at = null;
+    order.offer_answered_at = simTime;
+    order.next_retry_at = simTime;
+    order.last_transfer_reason = reason;
+    order.triggered = true;
+
+    this._syncDriverOrdersFromOrderLinks();
+    this._tryAssign(order, simTime);
+    return { ok: true, message: `${order.id} volvió a cola` };
   }
 
   handleDriverArrived(driver, type, simTime) {
@@ -341,6 +532,13 @@ export class AssignmentEngine {
     const { orders, customers } = this._world;
 
     if (type === 'at_restaurant') {
+      const inferredRestaurantId = (driver.orders ?? [])
+      .map(id => orders[id])
+      .find(o => o?.status === 'assigned' && o.picked_up_at == null)
+      ?.restaurant_id;
+
+      const restaurantId = driver.current_restaurant_id ?? inferredRestaurantId;
+
       const readyOrders = (driver.orders ?? [])
       .map(id => orders[id])
       .filter(o =>
@@ -348,7 +546,7 @@ export class AssignmentEngine {
       o.driver_id === driver.id &&
       o.kitchen_status === 'ready' &&
       o.picked_up_at == null &&
-      o.restaurant_id === driver.current_restaurant_id
+      o.restaurant_id === restaurantId
       );
       if (readyOrders.length === 0) {
         driver.status = 'waiting_at_restaurant';
