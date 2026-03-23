@@ -90,7 +90,7 @@ export class AssignmentCandidateFinder {
     const stops = this._routingPlanner.buildStops(driver, this._world);
     const segmentPromises = stops.map((stop, i) => {
       const fromPos = i === 0 ? driver.pos : stops[i - 1].pos;
-      return this._estimateTravelTime(fromPos, stop.pos, driver, simTime, traceId);
+      return this._estimateTravelTime(fromPos, stop.pos, driver, traceId);
     });
     const segmentTimes = await Promise.all(segmentPromises);
 

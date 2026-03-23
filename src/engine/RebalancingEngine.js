@@ -14,7 +14,7 @@ export class RebalancingEngine {
     if (world) this._world = world;
   }
 
-  _estimateRestaurantWaitForOrder(orderId, arrivalTime, simTime) {
+  _estimateRestaurantWaitForOrder(orderId) {
     const order = this._world.orders[orderId];
     if (!order) return 0;
 
