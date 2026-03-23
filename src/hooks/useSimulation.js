@@ -515,23 +515,71 @@ export function useSimulation() {
   }, []);
 
   const updateWorldParam = useCallback((name, value) => {
+    const numericValue = Number(value);
+
+    if (!Number.isFinite(numericValue)) {
+      pushManualEvent('role_action_error', `⚠️ Parámetro inválido para ${name}`, {
+        role: 'engine',
+        action: 'update_param',
+        param: name,
+      });
+      return { ok: false, message: `Valor inválido para ${name}` };
+    }
+
     const world = worldRef.current;
     world.params = {
       ...world.params,
-      [name]: Number(value),
+      [name]: numericValue,
     };
     syncWorld();
-  }, [syncWorld]);
+    pushManualEvent('role_action', `⚙️ Engine: ${name} = ${numericValue}`, {
+      role: 'engine',
+      action: 'update_param',
+      param: name,
+      value: numericValue,
+    });
+
+    return { ok: true, message: `${name} actualizado a ${numericValue}` };
+  }, [pushManualEvent, syncWorld]);
 
   const roleAction = useCallback((role, action, payload = {}) => {
     const world = worldRef.current;
     const simTimeNow = clockRef.current.simTime;
 
     const log = (message, extra = {}) => pushManualEvent('role_action', message, { role, action, ...extra });
+    const error = (message, extra = {}) => {
+      pushManualEvent('role_action_error', `⚠️ ${message}`, { role, action, ...extra });
+      return { ok: false, message };
+    };
+    const success = (message, extra = {}) => {
+      syncWorld();
+      log(message, extra);
+      return { ok: true, message };
+    };
+    const isTerminalOrder = (order) => !order || ['delivered', 'cancelled'].includes(order.status);
+    const detachOrderFromDriver = (order) => {
+      const driver = order?.driver_id ? world.drivers[order.driver_id] : null;
+      if (!driver) return null;
+      driver.orders = (driver.orders ?? []).filter(id => id !== order.id);
+      if ((driver.orders ?? []).length === 0 && driver.status !== 'offline') driver.status = 'idle';
+      assignRef.current?._syncDriverOrdersFromOrderLinks?.();
+      assignRef.current?._routingPlanner?.replan(driver);
+      return driver;
+    };
+    const queueOrderAgain = (order) => {
+      order.driver_id = null;
+      order.status = 'queued';
+      order.assigned_at = null;
+      order.next_retry_at = simTimeNow;
+      order.triggered = true;
+      order.triggered_at = Number.isFinite(order.triggered_at) ? order.triggered_at : simTimeNow;
+      order.last_transferred_at = simTimeNow;
+      assignRef.current?.handleOrderCreated?.(order.id, simTimeNow);
+    };
 
     if (role === 'driver') {
       const driver = world.drivers[payload.driverId];
-      if (!driver) return false;
+      if (!driver) return error('Driver no encontrado');
 
       const order = payload.orderId ? world.orders[payload.orderId] : null;
 
@@ -542,9 +590,8 @@ export function useSimulation() {
         } else if (driver.is_available && driver.status === 'offline') {
           driver.status = 'idle';
         }
-        syncWorld();
-        log(`🛵 ${driver.name} ${driver.is_available ? 'está disponible' : 'se puso offline'}`, { driverId: driver.id });
-        return true;
+        driver.last_availability_toggle_at = simTimeNow;
+        return success(`🛵 ${driver.name} ${driver.is_available ? 'quedó disponible' : 'quedó fuera de línea'}`, { driverId: driver.id });
       }
 
       if (action === 'reportLocation') {
@@ -553,16 +600,21 @@ export function useSimulation() {
           lat: driver.pos.lat + jitter(),
           lng: driver.pos.lng + jitter(),
         };
-        syncWorld();
-        log(`📍 ${driver.name} reportó ubicación manual`, { driverId: driver.id });
-        return true;
+        driver.last_location_report_at = simTimeNow;
+        return success(`📍 ${driver.name} reportó ubicación manual`, { driverId: driver.id });
       }
 
-      if (!order) return false;
+      if (!order) return error('Selecciona un pedido para esta acción', { driverId: driver.id });
+      if (isTerminalOrder(order)) return error(`El pedido ${order.id} ya no admite acciones manuales`, { driverId: driver.id, orderId: order.id });
 
       if (action === 'acceptOffer' || action === 'claimOrder') {
-        if (order.driver_id && order.driver_id !== driver.id) return false;
-        if (driver.status === 'offline' || driver.is_available === false) return false;
+        if (order.driver_id && order.driver_id !== driver.id) return error(`El pedido ${order.id} ya está tomado por otro driver`, { driverId: driver.id, orderId: order.id });
+        if (driver.status === 'offline' || driver.is_available === false) return error(`${driver.name} está offline y no puede tomar pedidos`, { driverId: driver.id, orderId: order.id });
+
+        const restaurant = world.restaurants[order.restaurant_id];
+        if (restaurant && restaurant.manual_open_override === false) {
+          return error(`${restaurant.name} está pausado y no acepta retiros`, { driverId: driver.id, orderId: order.id, restaurantId: restaurant.id });
+        }
 
         order.driver_id = driver.id;
         order.status = 'assigned';
@@ -571,173 +623,153 @@ export function useSimulation() {
         order.triggered_at = Number.isFinite(order.triggered_at) ? order.triggered_at : simTimeNow;
         driver.orders = Array.from(new Set([...(driver.orders ?? []), order.id]));
         driver.status = 'moving_to_pickup';
+        driver.current_restaurant_id = order.restaurant_id;
         assignRef.current?._syncDriverOrdersFromOrderLinks?.();
         assignRef.current?._routingPlanner?.replan(driver);
-        syncWorld();
-        log(`✅ ${driver.name} ${action === 'claimOrder' ? 'reclamó' : 'aceptó'} ${order.id}`, { driverId: driver.id, orderId: order.id });
-        return true;
+        return success(`✅ ${driver.name} ${action === 'claimOrder' ? 'reclamó' : 'aceptó'} ${order.id}`, { driverId: driver.id, orderId: order.id });
       }
 
       if (action === 'rejectOffer') {
         order.manual_rejections = (order.manual_rejections ?? 0) + 1;
         order.last_rejected_driver_id = driver.id;
-        syncWorld();
-        log(`❌ ${driver.name} rechazó ${order.id}`, { driverId: driver.id, orderId: order.id });
-        return true;
+        order.last_rejected_at = simTimeNow;
+        order.next_retry_at = Math.max(order.next_retry_at ?? 0, simTimeNow + 5);
+        return success(`❌ ${driver.name} rechazó ${order.id}; se reagendará para reintento`, { driverId: driver.id, orderId: order.id });
       }
 
       if (action === 'requestRebalance') {
+        if (order.driver_id !== driver.id) return error(`El pedido ${order.id} no está asignado a ${driver.name}`, { driverId: driver.id, orderId: order.id });
+        detachOrderFromDriver(order);
         order.rebalance_requested_at = simTimeNow;
-        syncWorld();
-        log(`🔄 ${driver.name} pidió rebalanceo para ${order.id}`, { driverId: driver.id, orderId: order.id });
-        return true;
+        queueOrderAgain(order);
+        return success(`🔄 ${driver.name} pidió rebalanceo para ${order.id}; volvió a cola`, { driverId: driver.id, orderId: order.id });
       }
 
       if (action === 'releaseOrder') {
-        if (order.driver_id !== driver.id) return false;
-        order.driver_id = null;
-        order.status = 'queued';
-        order.assigned_at = null;
-        order.next_retry_at = simTimeNow;
-        driver.orders = (driver.orders ?? []).filter(id => id !== order.id);
-        if ((driver.orders ?? []).length === 0 && driver.status !== 'offline') driver.status = 'idle';
-        assignRef.current?._syncDriverOrdersFromOrderLinks?.();
-        assignRef.current?.handleDriverLoadReduced?.(driver.id, simTimeNow);
-        assignRef.current?._routingPlanner?.replan(driver);
-        syncWorld();
-        log(`🧯 ${driver.name} liberó ${order.id}`, { driverId: driver.id, orderId: order.id });
-        return true;
+        if (order.driver_id !== driver.id) return error(`El pedido ${order.id} no está asignado a ${driver.name}`, { driverId: driver.id, orderId: order.id });
+        detachOrderFromDriver(order);
+        queueOrderAgain(order);
+        return success(`🧯 ${driver.name} liberó ${order.id}; volvió a cola`, { driverId: driver.id, orderId: order.id });
       }
 
-      return false;
+      return error(`Acción de driver no soportada: ${action}`, { driverId: driver.id });
     }
 
     if (role === 'restaurant') {
       const restaurant = world.restaurants[payload.restaurantId];
-      if (!restaurant) return false;
+      if (!restaurant) return error('Comercio no encontrado');
       const order = payload.orderId ? world.orders[payload.orderId] : null;
 
       if (action === 'toggleOpen') {
         restaurant.manual_open_override = !(restaurant.manual_open_override ?? true);
-        syncWorld();
-        log(`🏪 ${restaurant.name} ${restaurant.manual_open_override ? 'abrió operación' : 'pausó operación'}`, { restaurantId: restaurant.id });
-        return true;
+        restaurant.last_open_toggle_at = simTimeNow;
+        return success(`🏪 ${restaurant.name} ${restaurant.manual_open_override ? 'abrió operación' : 'pausó operación'}`, { restaurantId: restaurant.id });
       }
 
       if (action === 'speedPrepUp') {
         restaurant.prep_time_s = Math.max(60, Math.round((restaurant.prep_time_s ?? 600) - 60));
-        syncWorld();
-        log(`⚡ ${restaurant.name} redujo su prep a ${restaurant.prep_time_s}s`, { restaurantId: restaurant.id });
-        return true;
+        return success(`⚡ ${restaurant.name} redujo su prep a ${restaurant.prep_time_s}s`, { restaurantId: restaurant.id });
       }
 
       if (action === 'slowPrepDown') {
         restaurant.prep_time_s = Math.min(3600, Math.round((restaurant.prep_time_s ?? 600) + 60));
-        syncWorld();
-        log(`🐢 ${restaurant.name} aumentó su prep a ${restaurant.prep_time_s}s`, { restaurantId: restaurant.id });
-        return true;
+        return success(`🐢 ${restaurant.name} aumentó su prep a ${restaurant.prep_time_s}s`, { restaurantId: restaurant.id });
       }
 
-      if (!order) return false;
+      if (!order) return error('Selecciona un pedido del comercio', { restaurantId: restaurant.id });
+      if (isTerminalOrder(order)) return error(`El pedido ${order.id} ya está cerrado`, { restaurantId: restaurant.id, orderId: order.id });
 
       if (action === 'markPreparing') {
         order.kitchen_status = 'preparing';
         order.prep_started_at = Number.isFinite(order.prep_started_at) ? order.prep_started_at : simTimeNow;
-        syncWorld();
-        log(`🍳 ${restaurant.name} puso ${order.id} en preparación`, { restaurantId: restaurant.id, orderId: order.id });
-        return true;
+        order.kitchen_ready_at = null;
+        return success(`🍳 ${restaurant.name} puso ${order.id} en preparación`, { restaurantId: restaurant.id, orderId: order.id });
       }
 
       if (action === 'markReady') {
         order.kitchen_status = 'ready';
         order.kitchen_ready_at = simTimeNow;
-        syncWorld();
-        log(`🍱 ${restaurant.name} marcó ${order.id} listo para retiro`, { restaurantId: restaurant.id, orderId: order.id });
-        return true;
+        return success(`🍱 ${restaurant.name} marcó ${order.id} listo para retiro`, { restaurantId: restaurant.id, orderId: order.id });
       }
 
       if (action === 'sendSuggestion') {
         order.suggestion_status = 'pending_customer';
         order.suggestion_text = payload.note || 'Sugerencia manual enviada desde el panel';
-        syncWorld();
-        log(`💡 ${restaurant.name} envió sugerencia para ${order.id}`, { restaurantId: restaurant.id, orderId: order.id });
-        return true;
+        order.suggested_at = simTimeNow;
+        return success(`💡 ${restaurant.name} envió sugerencia para ${order.id}`, { restaurantId: restaurant.id, orderId: order.id });
       }
 
       if (action === 'cancelOrder') {
-        const driver = order.driver_id ? world.drivers[order.driver_id] : null;
-        if (driver) {
-          driver.orders = (driver.orders ?? []).filter(id => id !== order.id);
-          if ((driver.orders ?? []).length === 0 && driver.status !== 'offline') driver.status = 'idle';
-          assignRef.current?._routingPlanner?.replan(driver);
-        }
+        detachOrderFromDriver(order);
         order.driver_id = null;
         order.status = 'cancelled';
         order.cancelled_by = 'restaurant';
-        syncWorld();
-        log(`⛔ ${restaurant.name} canceló ${order.id}`, { restaurantId: restaurant.id, orderId: order.id });
-        return true;
+        order.cancelled_at = simTimeNow;
+        return success(`⛔ ${restaurant.name} canceló ${order.id}`, { restaurantId: restaurant.id, orderId: order.id });
       }
 
-      return false;
+      return error(`Acción de comercio no soportada: ${action}`, { restaurantId: restaurant.id });
     }
 
     if (role === 'customer') {
       const customer = world.customers[payload.customerId];
-      if (!customer) return false;
+      if (!customer) return error('Cliente no encontrado');
       const order = payload.orderId ? world.orders[payload.orderId] : null;
 
       if (action === 'placeOrder') {
-        if (!payload.restaurantId) return false;
+        if (!payload.restaurantId) return error('Selecciona un comercio para crear el pedido', { customerId: customer.id });
+        const restaurant = world.restaurants[payload.restaurantId];
+        if (!restaurant) return error('Comercio no encontrado para crear el pedido', { customerId: customer.id, restaurantId: payload.restaurantId });
+        if (restaurant.manual_open_override === false) {
+          return error(`${restaurant.name} está pausado y no recibe pedidos`, { customerId: customer.id, restaurantId: restaurant.id });
+        }
         const orderId = dispatchOrder(payload.restaurantId, customer.id, { amount_cents: payload.amountCents ?? 15000 });
-        log(`🛒 ${customer.name} creó ${orderId}`, { customerId: customer.id, orderId, restaurantId: payload.restaurantId });
-        return true;
+        return success(`🛒 ${customer.name} creó ${orderId}`, { customerId: customer.id, orderId, restaurantId: payload.restaurantId });
       }
 
-      if (!order) return false;
-
+      if (!order) return error('Selecciona un pedido del cliente', { customerId: customer.id });
       if (action === 'cancelOrder') {
-        if (['delivered', 'cancelled'].includes(order.status)) return false;
-        const driver = order.driver_id ? world.drivers[order.driver_id] : null;
-        if (driver) {
-          driver.orders = (driver.orders ?? []).filter(id => id !== order.id);
-          if ((driver.orders ?? []).length === 0 && driver.status !== 'offline') driver.status = 'idle';
-          assignRef.current?._routingPlanner?.replan(driver);
-        }
+        if (isTerminalOrder(order)) return error(`El pedido ${order.id} ya está cerrado`, { customerId: customer.id, orderId: order.id });
+        detachOrderFromDriver(order);
         order.driver_id = null;
         order.status = 'cancelled';
         order.cancelled_by = 'customer';
-        syncWorld();
-        log(`🚫 ${customer.name} canceló ${order.id}`, { customerId: customer.id, orderId: order.id });
-        return true;
+        order.cancelled_at = simTimeNow;
+        return success(`🚫 ${customer.name} canceló ${order.id}`, { customerId: customer.id, orderId: order.id });
       }
 
+      if (isTerminalOrder(order)) return error(`El pedido ${order.id} ya está cerrado`, { customerId: customer.id, orderId: order.id });
+
       if (action === 'acceptSuggestion') {
+        if (order.suggestion_status !== 'pending_customer') {
+          return error(`No hay sugerencia pendiente en ${order.id}`, { customerId: customer.id, orderId: order.id });
+        }
         order.suggestion_status = 'accepted';
-        syncWorld();
-        log(`👍 ${customer.name} aceptó sugerencia en ${order.id}`, { customerId: customer.id, orderId: order.id });
-        return true;
+        order.suggestion_answered_at = simTimeNow;
+        return success(`👍 ${customer.name} aceptó sugerencia en ${order.id}`, { customerId: customer.id, orderId: order.id });
       }
 
       if (action === 'rejectSuggestion') {
+        if (order.suggestion_status !== 'pending_customer') {
+          return error(`No hay sugerencia pendiente en ${order.id}`, { customerId: customer.id, orderId: order.id });
+        }
         order.suggestion_status = 'rejected';
-        syncWorld();
-        log(`👎 ${customer.name} rechazó sugerencia en ${order.id}`, { customerId: customer.id, orderId: order.id });
-        return true;
+        order.suggestion_answered_at = simTimeNow;
+        return success(`👎 ${customer.name} rechazó sugerencia en ${order.id}`, { customerId: customer.id, orderId: order.id });
       }
 
       if (action === 'requestSupport') {
+        order.support_status = 'open';
         order.support_requested_at = simTimeNow;
-        syncWorld();
-        log(`🆘 ${customer.name} abrió soporte para ${order.id}`, { customerId: customer.id, orderId: order.id });
-        return true;
+        return success(`🆘 ${customer.name} abrió soporte para ${order.id}`, { customerId: customer.id, orderId: order.id });
       }
 
-      return false;
+      return error(`Acción de cliente no soportada: ${action}`, { customerId: customer.id });
     }
 
-    return false;
+    return error(`Rol no soportado: ${role}`);
   }, [dispatchOrder, pushManualEvent, syncWorld]);
+
 
   return {
     // Estado

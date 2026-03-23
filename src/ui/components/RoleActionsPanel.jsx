@@ -30,6 +30,13 @@ const ENGINE_PARAM_GROUPS = [
   },
 ];
 
+const EMPTY_FEEDBACK = {
+  driver: null,
+  restaurant: null,
+  customer: null,
+  engine: null,
+};
+
 export default function RoleActionsPanel({ sim }) {
   const world = sim.world;
 
@@ -47,6 +54,7 @@ export default function RoleActionsPanel({ sim }) {
   const [customerRestaurantId, setCustomerRestaurantId] = useState('');
   const [customerAmount, setCustomerAmount] = useState(15000);
   const [paramEditing, setParamEditing] = useState({});
+  const [feedback, setFeedback] = useState(EMPTY_FEEDBACK);
 
   useEffect(() => {
     if (!driverId || !world.drivers[driverId]) setDriverId(drivers[0]?.id ?? '');
@@ -94,12 +102,33 @@ export default function RoleActionsPanel({ sim }) {
   }, [customerOrders, customerOrderId]);
 
   const selectedDriver = driverId ? world.drivers[driverId] : null;
+  const selectedDriverOrder = driverOrderId ? world.orders[driverOrderId] : null;
   const selectedRestaurant = restaurantId ? world.restaurants[restaurantId] : null;
+  const selectedRestaurantOrder = restaurantOrderId ? world.orders[restaurantOrderId] : null;
   const selectedCustomer = customerId ? world.customers[customerId] : null;
+  const selectedCustomerOrder = customerOrderId ? world.orders[customerOrderId] : null;
 
-  const doRoleAction = (role, action, payload = {}) => {
-    sim.roleAction(role, action, payload);
-  };
+  function setRoleFeedback(role, result) {
+    if (!result) return;
+    setFeedback(prev => ({
+      ...prev,
+      [role]: {
+        ok: result.ok !== false,
+        message: result.message,
+        at: Date.now(),
+      },
+    }));
+  }
+
+  function doRoleAction(role, action, payload = {}) {
+    const result = sim.roleAction(role, action, payload);
+    setRoleFeedback(role, result);
+  }
+
+  function saveEngineParam(key, value) {
+    const result = sim.updateWorldParam(key, value);
+    setRoleFeedback('engine', result);
+  }
 
   return (
     <div style={{ flex: 1, overflowY: 'auto' }}>
@@ -127,6 +156,12 @@ export default function RoleActionsPanel({ sim }) {
             </>
           ) : 'Selecciona un driver para habilitar acciones'}
         </MiniState>
+        <OrderSnapshot
+          title="Pedido seleccionado"
+          order={selectedDriverOrder}
+          restaurant={selectedDriverOrder ? world.restaurants[selectedDriverOrder.restaurant_id] : null}
+          customer={selectedDriverOrder ? world.customers[selectedDriverOrder.customer_id] : null}
+        />
         <ButtonGrid>
           <ActionButton disabled={!selectedDriver} onClick={() => doRoleAction('driver', 'toggleAvailability', { driverId })}>Disponibilidad</ActionButton>
           <ActionButton disabled={!selectedDriver} onClick={() => doRoleAction('driver', 'reportLocation', { driverId })}>Ubicación</ActionButton>
@@ -136,6 +171,7 @@ export default function RoleActionsPanel({ sim }) {
           <ActionButton disabled={!selectedDriver || !driverOrderId} onClick={() => doRoleAction('driver', 'requestRebalance', { driverId, orderId: driverOrderId })}>Rebalanceo</ActionButton>
           <ActionButton disabled={!selectedDriver || !driverOrderId} onClick={() => doRoleAction('driver', 'releaseOrder', { driverId, orderId: driverOrderId })}>Liberar pedido</ActionButton>
         </ButtonGrid>
+        <FeedbackBanner feedback={feedback.driver} />
       </Section>
 
       <Section title="Comercio" color="var(--restaurant-color)">
@@ -162,6 +198,12 @@ export default function RoleActionsPanel({ sim }) {
             </>
           ) : 'Selecciona un comercio para habilitar acciones'}
         </MiniState>
+        <OrderSnapshot
+          title="Pedido seleccionado"
+          order={selectedRestaurantOrder}
+          restaurant={selectedRestaurant}
+          customer={selectedRestaurantOrder ? world.customers[selectedRestaurantOrder.customer_id] : null}
+        />
         <ButtonGrid>
           <ActionButton disabled={!selectedRestaurant} onClick={() => doRoleAction('restaurant', 'toggleOpen', { restaurantId })}>Abrir / pausar</ActionButton>
           <ActionButton disabled={!selectedRestaurant} onClick={() => doRoleAction('restaurant', 'speedPrepUp', { restaurantId })}>Prep -60s</ActionButton>
@@ -171,6 +213,7 @@ export default function RoleActionsPanel({ sim }) {
           <ActionButton disabled={!selectedRestaurant || !restaurantOrderId} onClick={() => doRoleAction('restaurant', 'sendSuggestion', { restaurantId, orderId: restaurantOrderId })}>Sugerencia</ActionButton>
           <ActionButton disabled={!selectedRestaurant || !restaurantOrderId} onClick={() => doRoleAction('restaurant', 'cancelOrder', { restaurantId, orderId: restaurantOrderId })}>Cancelar pedido</ActionButton>
         </ButtonGrid>
+        <FeedbackBanner feedback={feedback.restaurant} />
       </Section>
 
       <Section title="Cliente" color="var(--customer-color)">
@@ -210,6 +253,12 @@ export default function RoleActionsPanel({ sim }) {
             </>
           ) : 'Selecciona un cliente para habilitar acciones'}
         </MiniState>
+        <OrderSnapshot
+          title="Pedido seleccionado"
+          order={selectedCustomerOrder}
+          restaurant={selectedCustomerOrder ? world.restaurants[selectedCustomerOrder.restaurant_id] : null}
+          customer={selectedCustomer}
+        />
         <ButtonGrid>
           <ActionButton disabled={!selectedCustomer || !customerRestaurantId} onClick={() => doRoleAction('customer', 'placeOrder', { customerId, restaurantId: customerRestaurantId, amountCents: customerAmount })}>Crear pedido</ActionButton>
           <ActionButton disabled={!selectedCustomer || !customerOrderId} onClick={() => doRoleAction('customer', 'cancelOrder', { customerId, orderId: customerOrderId })}>Cancelar pedido</ActionButton>
@@ -217,6 +266,7 @@ export default function RoleActionsPanel({ sim }) {
           <ActionButton disabled={!selectedCustomer || !customerOrderId} onClick={() => doRoleAction('customer', 'rejectSuggestion', { customerId, orderId: customerOrderId })}>Rechazar sugerencia</ActionButton>
           <ActionButton disabled={!selectedCustomer || !customerOrderId} onClick={() => doRoleAction('customer', 'requestSupport', { customerId, orderId: customerOrderId })}>Soporte</ActionButton>
         </ButtonGrid>
+        <FeedbackBanner feedback={feedback.customer} />
       </Section>
 
       <Section title="Engine" color="var(--accent)">
@@ -248,19 +298,19 @@ export default function RoleActionsPanel({ sim }) {
                         onChange={e => setParamEditing(prev => ({ ...prev, [item.key]: e.target.value }))}
                         onKeyDown={e => {
                           if (e.key === 'Enter') {
-                            sim.updateWorldParam(item.key, editingValue);
+                            saveEngineParam(item.key, editingValue);
                             setParamEditing(prev => ({ ...prev, [item.key]: String(Number(editingValue)) }));
                           }
                         }}
                         style={{ borderColor: dirty ? 'var(--accent)' : 'var(--border)' }}
                       />
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                        <button className={`btn ${dirty ? 'primary' : ''}`} style={{ justifyContent: 'center', padding: '4px 8px' }} onClick={() => sim.updateWorldParam(item.key, editingValue)}>
+                        <button className={`btn ${dirty ? 'primary' : ''}`} style={{ justifyContent: 'center', padding: '4px 8px' }} onClick={() => saveEngineParam(item.key, editingValue)}>
                           Guardar
                         </button>
                         <button className="btn" style={{ justifyContent: 'center', padding: '3px 8px' }} onClick={() => {
                           setParamEditing(prev => ({ ...prev, [item.key]: String(item.defaultValue) }));
-                          sim.updateWorldParam(item.key, item.defaultValue);
+                          saveEngineParam(item.key, item.defaultValue);
                         }}>
                           Default
                         </button>
@@ -272,6 +322,7 @@ export default function RoleActionsPanel({ sim }) {
             </div>
           ))}
         </div>
+        <FeedbackBanner feedback={feedback.engine} compact />
       </Section>
     </div>
   );
@@ -332,5 +383,47 @@ function MiniItem({ label, value }) {
     <span>
       <strong style={{ color: 'var(--text-0)', fontWeight: 600 }}>{label}:</strong> {value}
     </span>
+  );
+}
+
+function OrderSnapshot({ title, order, restaurant, customer }) {
+  return (
+    <div style={{ marginBottom: 10, padding: '8px 10px', borderRadius: 8, background: 'var(--bg-0)', border: '1px solid var(--border)', fontSize: 10, color: 'var(--text-1)' }}>
+      <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-0)', marginBottom: 6 }}>{title}</div>
+      {!order ? (
+        <span>No hay pedido seleccionado.</span>
+      ) : (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+          <MiniItem label="ID" value={order.id} />
+          <MiniItem label="Estado" value={order.status} />
+          <MiniItem label="Cocina" value={order.kitchen_status ?? '—'} />
+          <MiniItem label="Comercio" value={restaurant?.name ?? order.restaurant_id} />
+          <MiniItem label="Cliente" value={customer?.name ?? order.customer_id} />
+          <MiniItem label="Sugerencia" value={order.suggestion_status ?? '—'} />
+          <MiniItem label="Soporte" value={order.support_status ?? '—'} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FeedbackBanner({ feedback, compact = false }) {
+  if (!feedback?.message) return null;
+
+  return (
+    <div
+      style={{
+        marginTop: compact ? 10 : 12,
+        padding: compact ? '8px 10px' : '9px 10px',
+        borderRadius: 8,
+        border: `1px solid ${feedback.ok ? 'rgba(63,185,80,0.35)' : 'rgba(248,81,73,0.45)'}`,
+        background: feedback.ok ? 'rgba(63,185,80,0.12)' : 'rgba(248,81,73,0.12)',
+        color: feedback.ok ? 'var(--green)' : 'var(--red)',
+        fontSize: 11,
+        lineHeight: 1.35,
+      }}
+    >
+      {feedback.message}
+    </div>
   );
 }
