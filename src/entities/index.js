@@ -37,6 +37,7 @@ export function createDriver(pos, overrides = {}) {
     segment_elapsed: 0,          // segundos recorridos en el segmento actual
     stop_elapsed:  0,            // segundos en stop (semáforo/esquina)
     stop_duration: 0,            // duración total del stop actual
+    is_available:  true,
     metrics: {
       dead_km:          0,
       idle_time_s:      0,
@@ -63,6 +64,7 @@ export function createRestaurant(pos, overrides = {}) {
       driver_rating: overrides.metrics?.driver_rating ?? 5.0,
       user_rating:   overrides.metrics?.user_rating   ?? 5.0,
     },
+    manual_open_override: overrides.manual_open_override ?? true,
     orders_config: overrides.orders_config ?? [],
     ...overrides,
   };

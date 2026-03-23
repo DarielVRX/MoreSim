@@ -8,6 +8,7 @@ const EVENT_ICONS = {
   delivered:          '✅',
   arrived_restaurant: '🏪',
   no_driver:          '⚠️',
+  role_action:        '🎛️',
 };
 
 const EVENT_COLORS = {
@@ -17,6 +18,7 @@ const EVENT_COLORS = {
   delivered:          'var(--green)',
   arrived_restaurant: 'var(--restaurant-color)',
   no_driver:          'var(--red)',
+  role_action:        'var(--purple)',
 };
 
 function formatTime(s) {
